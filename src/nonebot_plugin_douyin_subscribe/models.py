@@ -30,6 +30,8 @@ class AuthorSubscription:
     sec_user_id: str
     author_name: str
     targets: dict[str, TargetSubscription] = field(default_factory=dict)
+    author_unique_id: str = ""
+    last_update_time: int = 0
 
 
 class SubscriptionStore:
@@ -64,6 +66,8 @@ class SubscriptionStore:
                     sec_user_id=sec_user_id,
                     author_name=item.get("author_name", sec_user_id),
                     targets=targets,
+                    author_unique_id=str(item.get("author_unique_id") or ""),
+                    last_update_time=int(item.get("last_update_time") or 0),
                 )
         except (OSError, TypeError, ValueError, KeyError) as exc:
             logger.warning(f"抖音订阅数据读取失败，将使用空订阅: {exc}")
@@ -73,9 +77,9 @@ class SubscriptionStore:
             self._load_unlocked()
             return {
                 key: AuthorSubscription(
-                    value.sec_user_id,
-                    value.author_name,
-                    {
+                    sec_user_id=value.sec_user_id,
+                    author_name=value.author_name,
+                    targets={
                         target_key: TargetSubscription(
                             target.target.copy(),
                             target.last_aweme_id,
@@ -83,6 +87,8 @@ class SubscriptionStore:
                         )
                         for target_key, target in value.targets.items()
                     },
+                    author_unique_id=value.author_unique_id,
+                    last_update_time=value.last_update_time,
                 )
                 for key, value in self._authors.items()
             }
@@ -94,6 +100,8 @@ class SubscriptionStore:
         target_key: str,
         target: dict[str, Any],
         last_aweme_id: str | None,
+        author_unique_id: str = "",
+        last_update_time: int = 0,
     ) -> None:
         async with self._lock:
             self._load_unlocked()
@@ -101,6 +109,8 @@ class SubscriptionStore:
                 sec_user_id, AuthorSubscription(sec_user_id, author_name)
             )
             author.author_name = author_name or author.author_name
+            author.author_unique_id = author_unique_id or author.author_unique_id
+            author.last_update_time = max(author.last_update_time, last_update_time)
             author.targets[target_key] = TargetSubscription(target, last_aweme_id)
             self._save_unlocked()
 
@@ -112,6 +122,8 @@ class SubscriptionStore:
         target: dict[str, Any],
         last_aweme_id: str | None,
         subscriber_id: str | None = None,
+        author_unique_id: str = "",
+        last_update_time: int = 0,
     ) -> bool:
         """新增订阅目标；目标已存在时不覆盖并返回 False。"""
 
@@ -124,12 +136,33 @@ class SubscriptionStore:
                 sec_user_id, AuthorSubscription(sec_user_id, author_name)
             )
             author.author_name = author_name or author.author_name
+            author.author_unique_id = author_unique_id or author.author_unique_id
+            author.last_update_time = max(author.last_update_time, last_update_time)
             subscriber_ids = [subscriber_id] if subscriber_id else []
             author.targets[target_key] = TargetSubscription(
                 target, last_aweme_id, subscriber_ids
             )
             self._save_unlocked()
             return True
+
+    async def update_author_metadata(
+        self,
+        sec_user_id: str,
+        author_name: str,
+        author_unique_id: str,
+        last_update_time: int,
+    ) -> None:
+        """更新作者缓存信息，供订阅列表脱离网络请求使用。"""
+
+        async with self._lock:
+            self._load_unlocked()
+            author = self._authors.get(sec_user_id)
+            if author is None:
+                return
+            author.author_name = author_name or author.author_name
+            author.author_unique_id = author_unique_id or author.author_unique_id
+            author.last_update_time = max(author.last_update_time, last_update_time)
+            self._save_unlocked()
 
     async def add_subscriber(
         self, sec_user_id: str, target_key: str, subscriber_id: str

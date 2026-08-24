@@ -206,3 +206,53 @@ def test_exponential_backoff_is_capped() -> None:
     ]
 
     assert delays == [30, 60, 120, 240, 300, 300]
+
+
+@pytest.mark.asyncio
+async def test_list_subscriptions_uses_cached_json_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SubscriptionStore(tmp_path)
+    monkeypatch.setattr(subscribe_plugin, "store", store)
+    target = Target.group("87654321")
+    await store.upsert_target(
+        "user-id",
+        "呆呆丸",
+        subscribe_plugin._target_key(target),
+        target.dump(),
+        "100",
+        "douyingid",
+        int(datetime(2026, 8, 25, 0, 20).timestamp()),
+    )
+
+    class FakeEvent:
+        pass
+
+    class FakeMessage:
+        def __init__(self, message: str) -> None:
+            self.message = message
+
+        async def send(self, **_kwargs: object) -> None:
+            sent.append(self.message)
+
+    class FakeUniMessage:
+        def __new__(cls, message: str) -> FakeMessage:
+            return FakeMessage(message)
+
+    sent: list[str] = []
+    monkeypatch.setattr(subscribe_plugin, "get_target", lambda *_args: target)
+    monkeypatch.setattr(subscribe_plugin, "UniMessage", FakeUniMessage)
+
+    async def fail_if_requested(_sec_user_id: str) -> list[douyin.DouyinWork]:
+        raise AssertionError("订阅列表不应发起网络请求")
+
+    monkeypatch.setattr(subscribe_plugin, "fetch_latest_works", fail_if_requested)
+
+    await subscribe_plugin.list_subscriptions(FakeEvent(), cast(Bot, object()))
+
+    assert sent == [
+        "当前会话的抖音订阅：\n"
+        "序号 昵称（抖音号） 最近更新\n"
+        "1. 呆呆丸（@douyingid）08月25日 00:20"
+    ]

@@ -22,7 +22,6 @@ from .config import config
 from .douyin import (
     DouyinRequestError,
     DouyinWork,
-    fetch_author_profile,
     fetch_latest_works,
     resolve_sec_user_id,
 )
@@ -86,14 +85,18 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
         await UniMessage(f"订阅失败：{exc}").finish()
 
     author_name = works[0].author_name if works else sec_user_id
+    author_unique_id = works[0].author_unique_id if works else ""
     latest_id = works[0].aweme_id if works else None
+    latest_update_time = works[0].create_time if works else 0
     added = await store.add_target(
         sec_user_id,
         author_name,
         target_key,
         target.dump(),
         latest_id,
-        subscriber_id,
+        subscriber_id=subscriber_id,
+        author_unique_id=author_unique_id,
+        last_update_time=latest_update_time,
     )
     if not added:
         if await store.add_subscriber(sec_user_id, target_key, subscriber_id):
@@ -151,28 +154,9 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
     else:
         lines: list[str] = []
         for index, author in enumerate(items, 1):
-            try:
-                works = await fetch_latest_works(author.sec_user_id)
-            except Exception:
-                logger.opt(exception=True).warning(
-                    f"抖音作者 {author.sec_user_id} 列表信息获取失败"
-                )
-                works = []
-            latest = works[0] if works else None
-            author_name = latest.author_name if latest else author.author_name
-            unique_id = latest.author_unique_id if latest else ""
-            if not unique_id:
-                try:
-                    profile_name, unique_id = await fetch_author_profile(
-                        author.sec_user_id
-                    )
-                except Exception:
-                    logger.opt(exception=True).warning(
-                        f"抖音作者 {author.sec_user_id} 资料获取失败"
-                    )
-                else:
-                    author_name = profile_name or author_name
-            updated_at = _format_update_time(latest.create_time if latest else 0)
+            author_name = author.author_name
+            unique_id = author.author_unique_id
+            updated_at = _format_update_time(author.last_update_time)
             handle = f"@{unique_id}" if unique_id else "@未知"
             lines.append(f"{index}. {author_name}（{handle}）{updated_at}")
         message = "当前会话的抖音订阅：\n序号 昵称（抖音号） 最近更新\n" + "\n".join(
@@ -224,6 +208,13 @@ async def poll_subscriptions() -> None:
                 )
                 break
             if works:
+                latest = works[0]
+                await store.update_author_metadata(
+                    author.sec_user_id,
+                    latest.author_name,
+                    latest.author_unique_id,
+                    latest.create_time,
+                )
                 for target_key, target_state in author.targets.items():
                     await _deliver_new_works(author, target_key, target_state, works)
             if index < len(authors) - 1:
