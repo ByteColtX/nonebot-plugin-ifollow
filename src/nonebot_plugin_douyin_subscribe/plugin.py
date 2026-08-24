@@ -14,7 +14,6 @@ from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target, get_target
 from nonebot_plugin_apscheduler import scheduler
-from nonebot_plugin_parser.parsers import DouyinParser
 from nonebot_plugin_parser.renders import get_renderer
 
 from .config import config
@@ -31,6 +30,7 @@ from .models import (
     TargetSubscription,
     make_target_key,
 )
+from .parser import DouyinSubscribeParser
 
 store = SubscriptionStore()
 poll_lock = asyncio.Lock()
@@ -327,7 +327,7 @@ async def _deliver_new_works(
 async def _send_through_parser(url: str, target: Target) -> None:
     """把抖音分享链接交给 parser，然后把 parser 的媒体消息发到目标。"""
 
-    parser = DouyinParser()
+    parser = DouyinSubscribeParser()
     keyword, searched = parser.search_url(url)
     result = await parser.parse(keyword, searched)
     renderer = get_renderer(result.platform.name)(result)
