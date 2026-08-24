@@ -21,6 +21,7 @@ from .config import config
 from .douyin import (
     DouyinRequestError,
     DouyinWork,
+    fetch_author_profile,
     fetch_latest_works,
     resolve_sec_user_id,
 )
@@ -46,6 +47,27 @@ SEND_BACKOFF_MAX_SECONDS = 300.0
 @get_driver().on_startup
 async def load_subscriptions() -> None:
     await store.load()
+
+
+async def _get_author_metadata(
+    sec_user_id: str,
+    work: DouyinWork,
+    cached_unique_id: str = "",
+) -> tuple[str, str]:
+    """补充作品接口缺失的作者昵称或抖音号。"""
+
+    author_name = work.author_name
+    author_unique_id = work.author_unique_id or cached_unique_id
+    if author_unique_id:
+        return author_name, author_unique_id
+    try:
+        profile_name, profile_unique_id = await fetch_author_profile(sec_user_id)
+    except Exception:
+        logger.opt(exception=True).warning(f"抖音作者 {sec_user_id} 资料补充失败")
+    else:
+        author_name = profile_name or author_name
+        author_unique_id = profile_unique_id
+    return author_name, author_unique_id
 
 
 @on_command("抖音订阅", aliases={"订阅抖音"}, priority=5, block=True).handle()
@@ -88,8 +110,12 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
         logger.opt(exception=True).warning("抖音订阅解析失败")
         await UniMessage(f"订阅失败：{exc}").finish()
 
-    author_name = works[0].author_name if works else sec_user_id
-    author_unique_id = works[0].author_unique_id if works else ""
+    author_name = sec_user_id
+    author_unique_id = ""
+    if works:
+        author_name, author_unique_id = await _get_author_metadata(
+            sec_user_id, works[0]
+        )
     latest_id = works[0].aweme_id if works else None
     latest_update_time = works[0].create_time if works else 0
     added = await store.add_target(
@@ -213,10 +239,15 @@ async def poll_subscriptions() -> None:
                 break
             if works:
                 latest = works[0]
+                author_name, author_unique_id = await _get_author_metadata(
+                    author.sec_user_id,
+                    latest,
+                    author.author_unique_id,
+                )
                 await store.update_author_metadata(
                     author.sec_user_id,
-                    latest.author_name,
-                    latest.author_unique_id,
+                    author_name,
+                    author_unique_id,
                     latest.create_time,
                 )
                 for target_key, target_state in author.targets.items():

@@ -209,6 +209,40 @@ def test_exponential_backoff_is_capped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_author_metadata_falls_back_to_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = douyin.DouyinWork(
+        "100", "https://www.douyin.com/video/100", "", 100, "作品昵称"
+    )
+    fetch_profile = AsyncMock(return_value=("资料昵称", "douyin_id"))
+    monkeypatch.setattr(subscribe_plugin, "fetch_author_profile", fetch_profile)
+
+    result = await subscribe_plugin._get_author_metadata("sec-user-id", work)
+
+    assert result == ("资料昵称", "douyin_id")
+    fetch_profile.assert_awaited_once_with("sec-user-id")
+
+
+@pytest.mark.asyncio
+async def test_get_author_metadata_uses_cached_unique_id_without_profile_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = douyin.DouyinWork(
+        "100", "https://www.douyin.com/video/100", "", 100, "作品昵称"
+    )
+    fetch_profile = AsyncMock()
+    monkeypatch.setattr(subscribe_plugin, "fetch_author_profile", fetch_profile)
+
+    result = await subscribe_plugin._get_author_metadata(
+        "sec-user-id", work, "cached_id"
+    )
+
+    assert result == ("作品昵称", "cached_id")
+    fetch_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_subscriptions_uses_cached_json_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
