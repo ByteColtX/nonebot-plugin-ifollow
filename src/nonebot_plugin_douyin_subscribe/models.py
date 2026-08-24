@@ -20,6 +20,7 @@ class TargetSubscription:
 
     target: dict[str, Any]
     last_aweme_id: str | None = None
+    subscriber_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -76,7 +77,9 @@ class SubscriptionStore:
                     value.author_name,
                     {
                         target_key: TargetSubscription(
-                            target.target.copy(), target.last_aweme_id
+                            target.target.copy(),
+                            target.last_aweme_id,
+                            list(target.subscriber_ids),
                         )
                         for target_key, target in value.targets.items()
                     },
@@ -108,6 +111,7 @@ class SubscriptionStore:
         target_key: str,
         target: dict[str, Any],
         last_aweme_id: str | None,
+        subscriber_id: str | None = None,
     ) -> bool:
         """新增订阅目标；目标已存在时不覆盖并返回 False。"""
 
@@ -120,9 +124,60 @@ class SubscriptionStore:
                 sec_user_id, AuthorSubscription(sec_user_id, author_name)
             )
             author.author_name = author_name or author.author_name
-            author.targets[target_key] = TargetSubscription(target, last_aweme_id)
+            subscriber_ids = [subscriber_id] if subscriber_id else []
+            author.targets[target_key] = TargetSubscription(
+                target, last_aweme_id, subscriber_ids
+            )
             self._save_unlocked()
             return True
+
+    async def add_subscriber(
+        self, sec_user_id: str, target_key: str, subscriber_id: str
+    ) -> bool:
+        """为已有订阅新增订阅人，返回是否实际新增。"""
+
+        if not subscriber_id:
+            return False
+        async with self._lock:
+            self._load_unlocked()
+            author = self._authors.get(sec_user_id)
+            target = author.targets.get(target_key) if author else None
+            if target is None or subscriber_id in target.subscriber_ids:
+                return False
+            target.subscriber_ids.append(subscriber_id)
+            self._save_unlocked()
+            return True
+
+    async def remove_subscriber(
+        self, sec_user_id: str, target_key: str, subscriber_id: str
+    ) -> tuple[bool, bool]:
+        """移除一个订阅人，返回（是否移除、是否删除整个目标）。"""
+
+        async with self._lock:
+            self._load_unlocked()
+            author = self._authors.get(sec_user_id)
+            if author is None:
+                return False, False
+            target = author.targets.get(target_key)
+            if target is None:
+                return False, False
+            if not target.subscriber_ids:
+                del author.targets[target_key]
+                if not author.targets:
+                    del self._authors[sec_user_id]
+                self._save_unlocked()
+                return True, True
+            if subscriber_id not in target.subscriber_ids:
+                return False, False
+            target.subscriber_ids.remove(subscriber_id)
+            if target.subscriber_ids:
+                self._save_unlocked()
+                return True, False
+            del author.targets[target_key]
+            if not author.targets:
+                del self._authors[sec_user_id]
+            self._save_unlocked()
+            return True, True
 
     async def remove_target(self, sec_user_id: str, target_key: str) -> bool:
         async with self._lock:

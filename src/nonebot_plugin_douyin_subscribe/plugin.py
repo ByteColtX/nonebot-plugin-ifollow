@@ -49,6 +49,7 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
 
     target = get_target(event, bot)
     target_key = _target_key(target)
+    subscriber_id = event.get_user_id()
     try:
         sec_user_id = await resolve_sec_user_id(value)
     except Exception as exc:
@@ -58,6 +59,11 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     authors = await store.snapshot()
     existing_author = authors.get(sec_user_id)
     if existing_author and target_key in existing_author.targets:
+        if await store.add_subscriber(sec_user_id, target_key, subscriber_id):
+            await UniMessage(
+                f"已加入抖音作者 {existing_author.author_name} 的更新提醒。"
+            ).send(target=target, bot=bot)
+            return
         await UniMessage(
             f"当前会话已订阅抖音作者 {existing_author.author_name}，无需重复订阅。"
         ).send(target=target, bot=bot)
@@ -72,9 +78,19 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     author_name = works[0].author_name if works else sec_user_id
     latest_id = works[0].aweme_id if works else None
     added = await store.add_target(
-        sec_user_id, author_name, target_key, target.dump(), latest_id
+        sec_user_id,
+        author_name,
+        target_key,
+        target.dump(),
+        latest_id,
+        subscriber_id,
     )
     if not added:
+        if await store.add_subscriber(sec_user_id, target_key, subscriber_id):
+            await UniMessage(f"已加入抖音作者 {author_name} 的更新提醒。").send(
+                target=target, bot=bot
+            )
+            return
         await UniMessage(f"当前会话已订阅抖音作者 {author_name}，无需重复订阅。").send(
             target=target, bot=bot
         )
@@ -99,10 +115,17 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
     except (ValueError, DouyinRequestError) as exc:
         await UniMessage(f"取消失败：{exc}").finish()
 
-    if await store.remove_target(sec_user_id, _target_key(target)):
+    removed, target_removed = await store.remove_subscriber(
+        sec_user_id, _target_key(target), event.get_user_id()
+    )
+    if removed and target_removed:
         await UniMessage("已取消订阅。").send(target=target, bot=bot)
+    elif removed:
+        await UniMessage("已取消你的更新提醒，其他订阅人仍会收到通知。").send(
+            target=target, bot=bot
+        )
     else:
-        await UniMessage("当前会话没有这个订阅。").send(target=target, bot=bot)
+        await UniMessage("当前会话没有你的这个订阅。").send(target=target, bot=bot)
 
 
 @on_command("抖音订阅列表", aliases={"订阅列表"}, priority=5, block=True).handle()
@@ -199,6 +222,7 @@ async def _deliver_new_works(
                 "失败，将在下次轮询重试"
             )
             break
+        await _notify_subscribers(target, target_state.subscriber_ids)
         await store.update_cursor(author.sec_user_id, target_key, work.aweme_id)
 
 
@@ -212,6 +236,21 @@ async def _send_through_parser(url: str, target: Target) -> None:
     messages = [message async for message in renderer.render_messages()]
     for message in messages:
         await message.send(target=target)
+
+
+async def _notify_subscribers(target: Target, subscriber_ids: list[str]) -> None:
+    """提醒订阅人作者有新作品。"""
+
+    if not subscriber_ids:
+        return
+    message = UniMessage()
+    for subscriber_id in subscriber_ids:
+        message += UniMessage.at(subscriber_id)
+    message += " 你订阅的爱播更新了"
+    try:
+        await message.send(target=target)
+    except Exception:
+        logger.opt(exception=True).warning("抖音订阅人提醒发送失败")
 
 
 def _target_key(target: Target) -> str:

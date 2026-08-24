@@ -153,6 +153,41 @@ async def test_get_replied_message_text_uses_onebot_reply_field() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_notify_subscribers_mentions_all_subscriber_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[list[object]] = []
+
+    class FakeMessage:
+        def __init__(self, *parts: object) -> None:
+            self.parts = list(parts)
+
+        def __iadd__(self, other: object) -> "FakeMessage":
+            if isinstance(other, FakeMessage):
+                self.parts.extend(other.parts)
+            else:
+                self.parts.append(other)
+            return self
+
+        async def send(self, **_kwargs: object) -> None:
+            sent.append(self.parts)
+
+    class FakeUniMessage:
+        def __new__(cls) -> FakeMessage:
+            return FakeMessage()
+
+        @classmethod
+        def at(cls, user_id: str) -> FakeMessage:
+            return FakeMessage(("at", user_id))
+
+    monkeypatch.setattr(subscribe_plugin, "UniMessage", FakeUniMessage)
+
+    await subscribe_plugin._notify_subscribers(Target.group("87654321"), ["111", "222"])
+
+    assert sent == [[("at", "111"), ("at", "222"), " 你订阅的爱播更新了"]]
+
+
 def test_format_update_time() -> None:
     timestamp = int(datetime(2026, 8, 25, 12, 34).timestamp())
 

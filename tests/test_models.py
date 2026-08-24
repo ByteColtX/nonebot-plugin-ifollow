@@ -38,3 +38,26 @@ async def test_add_target_does_not_overwrite_duplicate(tmp_path: Path) -> None:
 
     subscription = (await store.snapshot())["user-id"].targets["group-key"]
     assert subscription.last_aweme_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_subscribers_are_added_and_removed_independently(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target = {"id": "87654321", "private": False}
+
+    assert await store.add_target("user-id", "作者", "group-key", target, "100", "111")
+    assert await store.add_subscriber("user-id", "group-key", "222")
+    assert not await store.add_subscriber("user-id", "group-key", "222")
+
+    removed, target_removed = await store.remove_subscriber(
+        "user-id", "group-key", "111"
+    )
+    assert (removed, target_removed) == (True, False)
+    assert (await store.snapshot())["user-id"].targets["group-key"].subscriber_ids == [
+        "222"
+    ]
+
+    removed, target_removed = await store.remove_subscriber(
+        "user-id", "group-key", "222"
+    )
+    assert (removed, target_removed) == (True, True)
