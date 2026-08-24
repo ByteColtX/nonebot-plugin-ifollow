@@ -14,6 +14,7 @@ class FakeResponse:
         self._payload = payload
         self.text = payload if isinstance(payload, str) else ""
         self.status_code = status_code
+        self.headers = {"content-type": "application/json"}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -24,6 +25,8 @@ class FakeResponse:
             )
 
     def json(self) -> object:
+        if isinstance(self._payload, str):
+            raise ValueError("invalid JSON")
         return self._payload
 
 
@@ -172,6 +175,39 @@ async def test_fetch_latest_works_rejects_api_error(
 
     with pytest.raises(douyin.DouyinRequestError, match="1001"):
         await douyin.fetch_latest_works("MS4wLjABAAAA-test")
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_works_reports_http_error_and_marks_it_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeAsyncClient.response = FakeResponse(
+        url="https://www.douyin.com/aweme/v1/web/aweme/post/",
+        payload="<html><body>Access Denied</body></html>",
+        status_code=403,
+    )
+    monkeypatch.setattr(douyin.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(douyin.DouyinRequestError, match="HTTP 403") as exc_info:
+        await douyin.fetch_latest_works("MS4wLjABAAAA-test")
+
+    assert exc_info.value.retryable
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_works_reports_empty_response_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeAsyncClient.response = FakeResponse(
+        url="https://www.douyin.com/aweme/v1/web/aweme/post/",
+        payload="",
+    )
+    monkeypatch.setattr(douyin.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(douyin.DouyinRequestError, match="<empty>") as exc_info:
+        await douyin.fetch_latest_works("MS4wLjABAAAA-test")
+
+    assert exc_info.value.retryable
 
 
 @pytest.mark.asyncio

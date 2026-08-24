@@ -37,6 +37,17 @@ class DouyinWork:
 class DouyinRequestError(RuntimeError):
     """抖音接口不可用或返回了无法识别的数据。"""
 
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        """初始化抖音请求异常。
+
+        Args:
+            message: 面向日志或用户的错误信息。
+            retryable: 是否可能由临时风控或网络问题导致。
+        """
+
+        super().__init__(message)
+        self.retryable = retryable
+
 
 def extract_sec_user_id(value: str) -> str | None:
     """从作者主页 URL 或 sec_user_id 中提取作者 ID。"""
@@ -148,11 +159,24 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
         response = await client.get(
             "https://www.douyin.com/aweme/v1/web/aweme/post/", params=params
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = response.status_code
+            raise DouyinRequestError(
+                "抖音作品接口请求失败："
+                f"HTTP {status_code}，响应内容：{_response_excerpt(response.text)}",
+                retryable=status_code in {403, 429, 444, 500, 502, 503, 504},
+            ) from exc
         try:
             data = response.json()
         except ValueError as exc:
-            raise DouyinRequestError("抖音接口返回的不是 JSON") from exc
+            raise DouyinRequestError(
+                "抖音作品接口返回的不是 JSON："
+                f"HTTP {response.status_code}，响应内容："
+                f"{_response_excerpt(response.text)}",
+                retryable=True,
+            ) from exc
 
     if not isinstance(data, dict):
         raise DouyinRequestError("抖音接口返回格式异常")
@@ -189,6 +213,13 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
     works.sort(key=lambda work: (work.create_time, work.aweme_id), reverse=True)
     logger.debug(f"抖音作者 {sec_user_id} 拉取到 {len(works)} 个作品")
     return works
+
+
+def _response_excerpt(text: str, limit: int = 160) -> str:
+    """压缩并截取接口响应，避免错误日志过长。"""
+
+    excerpt = " ".join(text.split())
+    return repr(excerpt[:limit] if excerpt else "<empty>")
 
 
 async def fetch_author_profile(sec_user_id: str) -> tuple[str, str]:

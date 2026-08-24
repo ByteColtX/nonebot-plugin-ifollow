@@ -193,3 +193,16 @@ def test_format_update_time() -> None:
 
     assert subscribe_plugin._format_update_time(timestamp) == "08月25日 12:34"
     assert subscribe_plugin._format_update_time(0) == "未知"
+
+
+def test_exponential_backoff_is_capped() -> None:
+    delays = [
+        subscribe_plugin._exponential_backoff_seconds(
+            attempt,
+            base_seconds=30,
+            max_seconds=300,
+        )
+        for attempt in range(1, 7)
+    ]
+
+    assert delays == [30, 60, 120, 240, 300, 300]

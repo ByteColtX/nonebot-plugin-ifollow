@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import time
 from datetime import datetime
 from typing import Any
 
@@ -28,6 +30,14 @@ from .models import AuthorSubscription, SubscriptionStore, TargetSubscription
 
 store = SubscriptionStore()
 poll_lock = asyncio.Lock()
+poll_backoff_until = 0.0
+poll_failure_count = 0
+send_retry_attempts: dict[tuple[str, str, str], int] = {}
+send_retry_until: dict[tuple[str, str, str], float] = {}
+POLL_BACKOFF_BASE_SECONDS = 30.0
+POLL_BACKOFF_MAX_SECONDS = 300.0
+SEND_BACKOFF_BASE_SECONDS = 30.0
+SEND_BACKOFF_MAX_SECONDS = 300.0
 
 
 @get_driver().on_startup
@@ -179,23 +189,71 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
 async def poll_subscriptions() -> None:
     """轮询作者作品并向订阅目标发送新作品。"""
 
+    global poll_backoff_until, poll_failure_count
+
+    now = time.monotonic()
+    if now < poll_backoff_until:
+        remaining = math.ceil(poll_backoff_until - now)
+        logger.warning(f"抖音接口暂时受限，轮询暂停，预计 {remaining} 秒后重试")
+        return
     if poll_lock.locked():
         logger.warning("上一次抖音订阅轮询尚未完成，本次跳过")
         return
     async with poll_lock:
         authors = await store.snapshot()
-        for author in authors.values():
+        request_delay = max(
+            1.0, config.douyin_subscribe_interval / max(len(authors), 1)
+        )
+        for index, author in enumerate(authors.values()):
             try:
                 works = await fetch_latest_works(author.sec_user_id)
+            except DouyinRequestError as exc:
+                logger.warning(f"抖音作者 {author.sec_user_id} 轮询失败：{exc}")
+                delay = _record_poll_failure()
+                logger.warning(
+                    f"抖音轮询第 {poll_failure_count} 次失败，{delay:.0f} 秒后重试"
+                )
+                break
             except Exception:
                 logger.opt(exception=True).warning(
                     f"抖音作者 {author.sec_user_id} 轮询失败"
                 )
-                continue
-            if not works:
-                continue
-            for target_key, target_state in author.targets.items():
-                await _deliver_new_works(author, target_key, target_state, works)
+                delay = _record_poll_failure()
+                logger.warning(
+                    f"抖音轮询第 {poll_failure_count} 次失败，{delay:.0f} 秒后重试"
+                )
+                break
+            if works:
+                for target_key, target_state in author.targets.items():
+                    await _deliver_new_works(author, target_key, target_state, works)
+            if index < len(authors) - 1:
+                await asyncio.sleep(request_delay)
+        else:
+            poll_failure_count = 0
+            poll_backoff_until = 0.0
+
+
+def _record_poll_failure() -> float:
+    """记录一次轮询失败并返回下一次重试前的等待时间。"""
+
+    global poll_backoff_until, poll_failure_count
+
+    poll_failure_count += 1
+    delay = _exponential_backoff_seconds(
+        poll_failure_count,
+        base_seconds=POLL_BACKOFF_BASE_SECONDS,
+        max_seconds=POLL_BACKOFF_MAX_SECONDS,
+    )
+    poll_backoff_until = time.monotonic() + delay
+    return delay
+
+
+def _exponential_backoff_seconds(
+    attempt: int, *, base_seconds: float, max_seconds: float
+) -> float:
+    """计算指数退避时间，等待时间不会超过上限。"""
+
+    return min(base_seconds * (2 ** max(attempt - 1, 0)), max_seconds)
 
 
 async def _deliver_new_works(
@@ -214,14 +272,28 @@ async def _deliver_new_works(
             break
         unseen.append(work)
     for work in reversed(unseen):
+        retry_key = (author.sec_user_id, target_key, work.aweme_id)
+        retry_until = send_retry_until.get(retry_key, 0.0)
+        if time.monotonic() < retry_until:
+            return
         try:
             await _send_through_parser(work.share_url, target)
         except Exception:
+            attempt = send_retry_attempts.get(retry_key, 0) + 1
+            send_retry_attempts[retry_key] = attempt
+            delay = _exponential_backoff_seconds(
+                attempt,
+                base_seconds=SEND_BACKOFF_BASE_SECONDS,
+                max_seconds=SEND_BACKOFF_MAX_SECONDS,
+            )
+            send_retry_until[retry_key] = time.monotonic() + delay
             logger.opt(exception=True).warning(
                 f"向目标 {target.id} 发送抖音作品 {work.aweme_id} "
-                "失败，将在下次轮询重试"
+                f"失败，第 {attempt} 次重试将在 {delay:.0f} 秒后进行"
             )
             break
+        send_retry_attempts.pop(retry_key, None)
+        send_retry_until.pop(retry_key, None)
         await _notify_subscribers(target, target_state.subscriber_ids)
         await store.update_cursor(author.sec_user_id, target_key, work.aweme_id)
 
