@@ -5,13 +5,62 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
 from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_dir
+
+_TARGET_KEY_FIELDS = (
+    "id",
+    "parent_id",
+    "channel",
+    "private",
+    "adapter",
+    "scope",
+    "platforms",
+)
+_TARGET_KEY_DEFAULTS: dict[str, Any] = {
+    "id": "",
+    "parent_id": "",
+    "channel": False,
+    "private": False,
+    "adapter": "",
+    "scope": "",
+    "platforms": [],
+}
+
+
+def make_target_key(target: dict[str, Any]) -> str:
+    """根据目标身份字段生成稳定键。"""
+
+    identity = {
+        key: target.get(key, _TARGET_KEY_DEFAULTS[key])
+        if target.get(key) is not None
+        else _TARGET_KEY_DEFAULTS[key]
+        for key in _TARGET_KEY_FIELDS
+    }
+    return json.dumps(identity, ensure_ascii=False, sort_keys=True)
+
+
+def _compact_target(target: dict[str, Any]) -> dict[str, Any]:
+    """删除目标序列化中的默认字段。"""
+
+    compact = {"id": target["id"]}
+    for key in ("parent_id", "scope", "adapter"):
+        value = target.get(key)
+        if value:
+            compact[key] = value
+    for key in ("channel", "private"):
+        if target.get(key):
+            compact[key] = True
+    for key in ("self_id", "platforms", "extra"):
+        value = target.get(key)
+        if value:
+            compact[key] = value
+    return compact
 
 
 @dataclass
@@ -56,18 +105,35 @@ class SubscriptionStore:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            authors = raw.get("authors", {})
-            for sec_user_id, item in authors.items():
-                targets = {
-                    key: TargetSubscription(**target)
-                    for key, target in item.get("targets", {}).items()
-                }
+            if raw.get("version") != 2 or not isinstance(raw.get("authors"), list):
+                raise ValueError("不支持的订阅数据结构")
+            for item in raw["authors"]:
+                if not isinstance(item, dict):
+                    raise TypeError("作者数据必须是对象")
+                sec_user_id = str(item["sec_user_id"])
+                targets: dict[str, TargetSubscription] = {}
+                for target_item in item.get("targets", []):
+                    if not isinstance(target_item, dict):
+                        raise TypeError("目标数据必须是对象")
+                    target = target_item["target"]
+                    if not isinstance(target, dict):
+                        raise TypeError("目标信息必须是对象")
+                    subscribers = target_item.get("subscribers", [])
+                    if not isinstance(subscribers, list):
+                        raise TypeError("订阅人必须是数组")
+                    cursor = target_item.get("cursor")
+                    target_key = make_target_key(target)
+                    targets[target_key] = TargetSubscription(
+                        target=target,
+                        last_aweme_id=str(cursor) if cursor is not None else None,
+                        subscriber_ids=[str(value) for value in subscribers],
+                    )
                 self._authors[sec_user_id] = AuthorSubscription(
                     sec_user_id=sec_user_id,
-                    author_name=item.get("author_name", sec_user_id),
+                    author_name=str(item.get("name") or sec_user_id),
                     targets=targets,
-                    author_unique_id=str(item.get("author_unique_id") or ""),
-                    last_update_time=int(item.get("last_update_time") or 0),
+                    author_unique_id=str(item.get("unique_id") or ""),
+                    last_update_time=int(item.get("updated_at") or 0),
                 )
         except (OSError, TypeError, ValueError, KeyError) as exc:
             logger.warning(f"抖音订阅数据读取失败，将使用空订阅: {exc}")
@@ -237,8 +303,10 @@ class SubscriptionStore:
     def _save_unlocked(self) -> None:
         path = self._get_path()
         payload = {
-            "version": 1,
-            "authors": {key: asdict(value) for key, value in self._authors.items()},
+            "version": 2,
+            "authors": [
+                self._serialize_author(author) for author in self._authors.values()
+            ],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile(
@@ -248,6 +316,28 @@ class SubscriptionStore:
             temp.write("\n")
             temp_path = Path(temp.name)
         os.replace(temp_path, path)
+
+    @staticmethod
+    def _serialize_author(author: AuthorSubscription) -> dict[str, Any]:
+        """将作者模型转换为精简的 JSON 结构。"""
+
+        item: dict[str, Any] = {
+            "sec_user_id": author.sec_user_id,
+            "name": author.author_name,
+            "targets": [],
+        }
+        if author.author_unique_id:
+            item["unique_id"] = author.author_unique_id
+        if author.last_update_time:
+            item["updated_at"] = author.last_update_time
+        for target in author.targets.values():
+            target_item: dict[str, Any] = {"target": _compact_target(target.target)}
+            if target.last_aweme_id is not None:
+                target_item["cursor"] = target.last_aweme_id
+            if target.subscriber_ids:
+                target_item["subscribers"] = target.subscriber_ids
+            item["targets"].append(target_item)
+        return item
 
     def _get_path(self) -> Path:
         if self.path is None:

@@ -1,54 +1,61 @@
+import json
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from nonebot_plugin_douyin_subscribe.models import SubscriptionStore
+from nonebot_plugin_douyin_subscribe.models import SubscriptionStore, make_target_key
 
 
 @pytest.mark.asyncio
 async def test_subscription_store_round_trip_and_remove(tmp_path: Path) -> None:
     store = SubscriptionStore(tmp_path)
     target = {"id": "87654321", "private": False}
+    target_key = make_target_key(target)
 
     update_time = int(datetime(2026, 8, 25, 0, 20).timestamp())
     await store.upsert_target(
         "user-id",
         "作者",
-        "group-key",
+        target_key,
         target,
         "100",
         "douyin_id",
         update_time,
     )
+    stored = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
+    assert stored["version"] == 2
+    assert isinstance(stored["authors"], list)
+    assert stored["authors"][0]["targets"][0]["target"] == {"id": "87654321"}
 
     loaded = SubscriptionStore(tmp_path)
     snapshot = await loaded.snapshot()
     assert snapshot["user-id"].author_name == "作者"
     assert snapshot["user-id"].author_unique_id == "douyin_id"
     assert snapshot["user-id"].last_update_time == update_time
-    assert snapshot["user-id"].targets["group-key"].last_aweme_id == "100"
-    assert snapshot["user-id"].targets["group-key"].target == target
+    assert snapshot["user-id"].targets[target_key].last_aweme_id == "100"
+    assert snapshot["user-id"].targets[target_key].target == {"id": "87654321"}
 
-    await loaded.update_cursor("user-id", "group-key", "101")
+    await loaded.update_cursor("user-id", target_key, "101")
     assert (await loaded.snapshot())["user-id"].targets[
-        "group-key"
+        target_key
     ].last_aweme_id == "101"
 
-    assert await loaded.remove_target("user-id", "group-key")
+    assert await loaded.remove_target("user-id", target_key)
     assert await loaded.snapshot() == {}
-    assert not await loaded.remove_target("user-id", "group-key")
+    assert not await loaded.remove_target("user-id", target_key)
 
 
 @pytest.mark.asyncio
 async def test_add_target_does_not_overwrite_duplicate(tmp_path: Path) -> None:
     store = SubscriptionStore(tmp_path)
     target = {"id": "87654321", "private": False}
+    target_key = make_target_key(target)
 
-    assert await store.add_target("user-id", "作者", "group-key", target, "100")
-    assert not await store.add_target("user-id", "作者", "group-key", target, "200")
+    assert await store.add_target("user-id", "作者", target_key, target, "100")
+    assert not await store.add_target("user-id", "作者", target_key, target, "200")
 
-    subscription = (await store.snapshot())["user-id"].targets["group-key"]
+    subscription = (await store.snapshot())["user-id"].targets[target_key]
     assert subscription.last_aweme_id == "100"
 
 
@@ -56,20 +63,21 @@ async def test_add_target_does_not_overwrite_duplicate(tmp_path: Path) -> None:
 async def test_subscribers_are_added_and_removed_independently(tmp_path: Path) -> None:
     store = SubscriptionStore(tmp_path)
     target = {"id": "87654321", "private": False}
+    target_key = make_target_key(target)
 
-    assert await store.add_target("user-id", "作者", "group-key", target, "100", "111")
-    assert await store.add_subscriber("user-id", "group-key", "222")
-    assert not await store.add_subscriber("user-id", "group-key", "222")
+    assert await store.add_target("user-id", "作者", target_key, target, "100", "111")
+    assert await store.add_subscriber("user-id", target_key, "222")
+    assert not await store.add_subscriber("user-id", target_key, "222")
 
     removed, target_removed = await store.remove_subscriber(
-        "user-id", "group-key", "111"
+        "user-id", target_key, "111"
     )
     assert (removed, target_removed) == (True, False)
-    assert (await store.snapshot())["user-id"].targets["group-key"].subscriber_ids == [
+    assert (await store.snapshot())["user-id"].targets[target_key].subscriber_ids == [
         "222"
     ]
 
     removed, target_removed = await store.remove_subscriber(
-        "user-id", "group-key", "222"
+        "user-id", target_key, "222"
     )
     assert (removed, target_removed) == (True, True)

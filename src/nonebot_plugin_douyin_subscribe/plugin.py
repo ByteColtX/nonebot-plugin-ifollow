@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import time
 from datetime import datetime
@@ -25,7 +24,12 @@ from .douyin import (
     fetch_latest_works,
     resolve_sec_user_id,
 )
-from .models import AuthorSubscription, SubscriptionStore, TargetSubscription
+from .models import (
+    AuthorSubscription,
+    SubscriptionStore,
+    TargetSubscription,
+    make_target_key,
+)
 
 store = SubscriptionStore()
 poll_lock = asyncio.Lock()
@@ -319,23 +323,7 @@ async def _notify_subscribers(target: Target, subscriber_ids: list[str]) -> None
 def _target_key(target: Target) -> str:
     """生成不依赖对象地址的订阅目标键。"""
 
-    dumped = target.dump()
-    return json.dumps(
-        {
-            key: dumped.get(key, "")
-            for key in (
-                "id",
-                "parent_id",
-                "channel",
-                "private",
-                "adapter",
-                "scope",
-                "platforms",
-            )
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    return make_target_key(target.dump())
 
 
 def _format_update_time(timestamp: int) -> str:
