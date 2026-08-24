@@ -136,7 +136,11 @@ async def test_fetch_latest_works_sorts_and_ignores_invalid_items(
             "aweme_list": [
                 {"aweme_id": "1", "create_time": 10, "author": {"nickname": "作者"}},
                 {"aweme_id": "3", "create_time": 30, "desc": "最新"},
-                {"aweme_id": "2", "create_time": 20, "author": None},
+                {
+                    "aweme_id": "2",
+                    "create_time": 20,
+                    "author": {"unique_id": "douyin_id"},
+                },
                 {"desc": "missing id"},
                 "invalid",
             ],
@@ -149,6 +153,7 @@ async def test_fetch_latest_works_sorts_and_ignores_invalid_items(
     assert [work.aweme_id for work in works] == ["3", "2", "1"]
     assert works[0].share_url == "https://www.douyin.com/video/3"
     assert works[1].author_name == "MS4wLjABAAAA-test"
+    assert works[1].author_unique_id == "douyin_id"
     assert FakeAsyncClient.last_request is not None
     params = FakeAsyncClient.last_request[1].get("params")
     assert isinstance(params, dict)
@@ -167,3 +172,29 @@ async def test_fetch_latest_works_rejects_api_error(
 
     with pytest.raises(douyin.DouyinRequestError, match="1001"):
         await douyin.fetch_latest_works("MS4wLjABAAAA-test")
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_profile_extracts_unique_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeAsyncClient.response = FakeResponse(
+        url="https://www.douyin.com/aweme/v1/web/user/profile/other/",
+        payload={
+            "status_code": 0,
+            "user": {"nickname": "Kitty", "unique_id": "Kitty06666"},
+        },
+    )
+    monkeypatch.setattr(douyin.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await douyin.fetch_author_profile("MS4wLjABAAAA-test")
+
+    assert result == ("Kitty", "Kitty06666")
+
+
+def test_extract_unique_id_ignores_short_id_placeholder() -> None:
+    assert (
+        douyin._extract_unique_id({"unique_id": "Kitty06666", "short_id": "0"})
+        == "Kitty06666"
+    )
+    assert douyin._extract_unique_id({"short_id": "0"}) == ""

@@ -19,6 +19,7 @@ SEC_USER_ID_RE = re.compile(r"^MS4w[^\s/?#]+$")
 SHORT_LINK_RE = re.compile(r"https?://(?:v|jx)\.douyin\.com/[\w-]+")
 WORK_RE = re.compile(r"(?:https?://)?(?:www\.|m\.)?douyin\.com/video/(?P<aweme_id>\d+)")
 WORK_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+AUTHOR_PROFILE_URL = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class DouyinWork:
     description: str
     create_time: int
     author_name: str
+    author_unique_id: str = ""
 
 
 class DouyinRequestError(RuntimeError):
@@ -173,6 +175,7 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
         if not isinstance(author, dict):
             author = {}
         author_name = str(author.get("nickname") or sec_user_id)
+        author_unique_id = _extract_unique_id(author)
         works.append(
             DouyinWork(
                 aweme_id=aweme_id,
@@ -180,11 +183,52 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
                 description=str(raw.get("desc") or ""),
                 create_time=int(raw.get("create_time") or 0),
                 author_name=author_name,
+                author_unique_id=author_unique_id,
             )
         )
     works.sort(key=lambda work: (work.create_time, work.aweme_id), reverse=True)
     logger.debug(f"抖音作者 {sec_user_id} 拉取到 {len(works)} 个作品")
     return works
+
+
+async def fetch_author_profile(sec_user_id: str) -> tuple[str, str]:
+    """读取作者昵称和抖音号。"""
+
+    async with httpx.AsyncClient(
+        headers=_headers(),
+        follow_redirects=True,
+        timeout=20,
+        verify=False,
+    ) as client:
+        response = await client.get(
+            AUTHOR_PROFILE_URL,
+            params={"sec_user_id": sec_user_id, "aid": "6383"},
+        )
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DouyinRequestError("抖音作者资料接口返回的不是 JSON") from exc
+
+    if not isinstance(data, dict):
+        raise DouyinRequestError("抖音作者资料接口返回格式异常")
+    status_code = data.get("status_code", 0)
+    if status_code not in (0, "0", None):
+        raise DouyinRequestError(f"抖音作者资料接口返回错误码: {status_code}")
+    user = data.get("user")
+    if not isinstance(user, dict):
+        return "", ""
+    return str(user.get("nickname") or ""), _extract_unique_id(user)
+
+
+def _extract_unique_id(author: dict[str, object]) -> str:
+    """从作者对象提取抖音号，忽略接口返回的占位 short_id。"""
+
+    unique_id = str(author.get("unique_id") or "")
+    if unique_id:
+        return unique_id
+    short_id = str(author.get("short_id") or "")
+    return short_id if short_id and short_id != "0" else ""
 
 
 def _headers() -> dict[str, str]:

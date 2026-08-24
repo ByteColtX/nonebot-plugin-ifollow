@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from typing import Any
 
 from nonebot import get_driver, logger, on_command
@@ -19,6 +20,7 @@ from .config import config
 from .douyin import (
     DouyinRequestError,
     DouyinWork,
+    fetch_author_profile,
     fetch_latest_works,
     resolve_sec_user_id,
 )
@@ -114,9 +116,34 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
     if not items:
         message = "当前会话没有抖音订阅。"
     else:
-        message = "当前会话的抖音订阅：\n" + "\n".join(
-            f"{index}. {author.author_name}（{author.sec_user_id}）"
-            for index, author in enumerate(items, 1)
+        lines: list[str] = []
+        for index, author in enumerate(items, 1):
+            try:
+                works = await fetch_latest_works(author.sec_user_id)
+            except Exception:
+                logger.opt(exception=True).warning(
+                    f"抖音作者 {author.sec_user_id} 列表信息获取失败"
+                )
+                works = []
+            latest = works[0] if works else None
+            author_name = latest.author_name if latest else author.author_name
+            unique_id = latest.author_unique_id if latest else ""
+            if not unique_id:
+                try:
+                    profile_name, unique_id = await fetch_author_profile(
+                        author.sec_user_id
+                    )
+                except Exception:
+                    logger.opt(exception=True).warning(
+                        f"抖音作者 {author.sec_user_id} 资料获取失败"
+                    )
+                else:
+                    author_name = profile_name or author_name
+            updated_at = _format_update_time(latest.create_time if latest else 0)
+            handle = f"@{unique_id}" if unique_id else "@未知"
+            lines.append(f"{index}. {author_name}（{handle}）{updated_at}")
+        message = "当前会话的抖音订阅：\n序号 昵称（抖音号） 最近更新\n" + "\n".join(
+            lines
         )
     await UniMessage(message).send(target=target, bot=bot)
 
@@ -207,6 +234,14 @@ def _target_key(target: Target) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def _format_update_time(timestamp: int) -> str:
+    """把作品时间戳格式化为月日时分。"""
+
+    if timestamp <= 0:
+        return "未知"
+    return datetime.fromtimestamp(timestamp).strftime("%m月%d日 %H:%M")
 
 
 async def _get_replied_message_text(event: Event, bot: Bot) -> str:

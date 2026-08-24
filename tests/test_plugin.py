@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
@@ -150,3 +151,10 @@ async def test_get_replied_message_text_uses_onebot_reply_field() -> None:
         )
         == "https://v.douyin.com/abc123/"
     )
+
+
+def test_format_update_time() -> None:
+    timestamp = int(datetime(2026, 8, 25, 12, 34).timestamp())
+
+    assert subscribe_plugin._format_update_time(timestamp) == "08月25日 12:34"
+    assert subscribe_plugin._format_update_time(0) == "未知"
