@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Environments and local configuration
+.env
+.env.*
+.venv/
+venv/
+ENV/
+
+# Test and coverage reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+.pytest_cache/
+.tox/
+.nox/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+*.log
+
+# Local plugin data
+cache/
