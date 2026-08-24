@@ -11,7 +11,8 @@ from nonebot import logger
 from .config import config
 
 PROFILE_RE = re.compile(
-    r"(?:https?://)?(?:www\.|m\.)?douyin\.com/user/"
+    r"(?:https?://)?(?:(?:www\.|m\.)?douyin\.com/user/"
+    r"|(?:www\.)?iesdouyin\.com/share/user/)"
     r"(?P<sec_user_id>[^/?#\s\"'<>]+)"
 )
 SEC_USER_ID_RE = re.compile(r"^MS4w[^\s/?#]+$")

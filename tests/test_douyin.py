@@ -60,6 +60,12 @@ def test_extract_sec_user_id_supports_profile_url_and_raw_id() -> None:
         == "MS4wLjABAAAA-test"
     )
     assert douyin.extract_sec_user_id("MS4wLjABAAAA-test") == "MS4wLjABAAAA-test"
+    assert (
+        douyin.extract_sec_user_id(
+            "https://www.iesdouyin.com/share/user/MS4wLjABAAAA-share"
+        )
+        == "MS4wLjABAAAA-share"
+    )
     assert douyin.extract_sec_user_id("https://www.douyin.com/video/123") is None
 
 
@@ -76,6 +82,22 @@ async def test_resolve_sec_user_id_follows_short_link(
 
     assert result == "MS4wLjABAAAA-resolved"
     assert FakeAsyncClient.last_request == ("https://v.douyin.com/abc123", {})
+
+
+@pytest.mark.asyncio
+async def test_resolve_sec_user_id_supports_iesdouyin_author_share_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeAsyncClient.response = FakeResponse(
+        url="https://www.iesdouyin.com/share/user/MS4wLjABAAAA-share"
+    )
+    monkeypatch.setattr(douyin.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await douyin.resolve_sec_user_id(
+        "抖音订阅 https://v.douyin.com/hTjwO7-Meqg/"
+    )
+
+    assert result == "MS4wLjABAAAA-share"
 
 
 @pytest.mark.asyncio

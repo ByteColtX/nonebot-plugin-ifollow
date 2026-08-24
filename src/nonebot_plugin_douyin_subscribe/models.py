@@ -101,6 +101,29 @@ class SubscriptionStore:
             author.targets[target_key] = TargetSubscription(target, last_aweme_id)
             self._save_unlocked()
 
+    async def add_target(
+        self,
+        sec_user_id: str,
+        author_name: str,
+        target_key: str,
+        target: dict[str, Any],
+        last_aweme_id: str | None,
+    ) -> bool:
+        """新增订阅目标；目标已存在时不覆盖并返回 False。"""
+
+        async with self._lock:
+            self._load_unlocked()
+            author = self._authors.get(sec_user_id)
+            if author and target_key in author.targets:
+                return False
+            author = self._authors.setdefault(
+                sec_user_id, AuthorSubscription(sec_user_id, author_name)
+            )
+            author.author_name = author_name or author.author_name
+            author.targets[target_key] = TargetSubscription(target, last_aweme_id)
+            self._save_unlocked()
+            return True
+
     async def remove_target(self, sec_user_id: str, target_key: str) -> bool:
         async with self._lock:
             self._load_unlocked()

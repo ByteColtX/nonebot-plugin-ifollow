@@ -45,20 +45,38 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
             "用法：抖音订阅 <作者主页链接、作品分享链接或 sec_user_id>"
         ).finish()
 
+    target = get_target(event, bot)
+    target_key = _target_key(target)
     try:
         sec_user_id = await resolve_sec_user_id(value)
+    except Exception as exc:
+        logger.opt(exception=True).warning("抖音订阅解析失败")
+        await UniMessage(f"订阅失败：{exc}").finish()
+
+    authors = await store.snapshot()
+    existing_author = authors.get(sec_user_id)
+    if existing_author and target_key in existing_author.targets:
+        await UniMessage(
+            f"当前会话已订阅抖音作者 {existing_author.author_name}，无需重复订阅。"
+        ).send(target=target, bot=bot)
+        return
+
+    try:
         works = await fetch_latest_works(sec_user_id)
     except Exception as exc:
         logger.opt(exception=True).warning("抖音订阅解析失败")
         await UniMessage(f"订阅失败：{exc}").finish()
 
-    target = get_target(event, bot)
-    target_key = _target_key(target)
     author_name = works[0].author_name if works else sec_user_id
     latest_id = works[0].aweme_id if works else None
-    await store.upsert_target(
+    added = await store.add_target(
         sec_user_id, author_name, target_key, target.dump(), latest_id
     )
+    if not added:
+        await UniMessage(f"当前会话已订阅抖音作者 {author_name}，无需重复订阅。").send(
+            target=target, bot=bot
+        )
+        return
     message = (
         f"已订阅抖音作者 {author_name}。\n"
         "首次订阅不会补发历史作品，有新作品时会自动发送。"

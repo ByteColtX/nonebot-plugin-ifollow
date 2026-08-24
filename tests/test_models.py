@@ -26,3 +26,15 @@ async def test_subscription_store_round_trip_and_remove(tmp_path: Path) -> None:
     assert await loaded.remove_target("user-id", "group-key")
     assert await loaded.snapshot() == {}
     assert not await loaded.remove_target("user-id", "group-key")
+
+
+@pytest.mark.asyncio
+async def test_add_target_does_not_overwrite_duplicate(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target = {"id": "87654321", "private": False}
+
+    assert await store.add_target("user-id", "作者", "group-key", target, "100")
+    assert not await store.add_target("user-id", "作者", "group-key", target, "200")
+
+    subscription = (await store.snapshot())["user-id"].targets["group-key"]
+    assert subscription.last_aweme_id == "100"
