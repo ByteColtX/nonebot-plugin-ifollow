@@ -8,13 +8,19 @@ from nonebot_plugin_douyin_subscribe import douyin
 
 class FakeResponse:
     def __init__(
-        self, *, url: str, payload: object = None, status_code: int = 200
+        self,
+        *,
+        url: str,
+        payload: object = None,
+        status_code: int = 200,
+        cookies: dict[str, str] | None = None,
     ) -> None:
         self.url = httpx.URL(url)
         self._payload = payload
         self.text = payload if isinstance(payload, str) else ""
         self.status_code = status_code
         self.headers = {"content-type": "application/json"}
+        self.cookies = httpx.Cookies(cookies or {})
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -54,6 +60,18 @@ class FakeAsyncClient:
             return type(self).responses.pop(0)
         return type(self).response
 
+    async def post(self, url: str, **kwargs: object) -> FakeResponse:
+        assert not self.closed
+        type(self).last_request = (url, kwargs)
+        if type(self).responses:
+            return type(self).responses.pop(0)
+        return type(self).response
+
+
+@pytest.fixture(autouse=True)
+def reset_ttwid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(douyin, "_ttwid", "test-ttwid")
+
 
 def test_extract_sec_user_id_supports_profile_url_and_raw_id() -> None:
     assert (
@@ -84,7 +102,10 @@ async def test_resolve_sec_user_id_follows_short_link(
     result = await douyin.resolve_sec_user_id("https://v.douyin.com/abc123/")
 
     assert result == "MS4wLjABAAAA-resolved"
-    assert FakeAsyncClient.last_request == ("https://v.douyin.com/abc123", {})
+    assert FakeAsyncClient.last_request == (
+        "https://v.douyin.com/abc123",
+        {"cookies": {}},
+    )
 
 
 @pytest.mark.asyncio
@@ -129,6 +150,36 @@ async def test_resolve_sec_user_id_extracts_author_from_work_page(
 
 
 @pytest.mark.asyncio
+async def test_ensure_ttwid_registers_and_caches_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeAsyncClient.response = FakeResponse(
+        url="https://ttwid.bytedance.com/ttwid/union/register/",
+        payload={"status_code": 0, "message": "union register success"},
+        cookies={"ttwid": "registered-ttwid"},
+    )
+    monkeypatch.setattr(douyin.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(douyin, "_ttwid", None)
+
+    result = await douyin._ensure_ttwid()
+
+    assert result == "registered-ttwid"
+    assert FakeAsyncClient.last_request is not None
+    assert FakeAsyncClient.last_request[0] == douyin.TTWID_REGISTER_URL
+    json_payload = FakeAsyncClient.last_request[1]["json"]
+    assert isinstance(json_payload, dict)
+    assert json_payload["service"] == "www.douyin.com"
+
+
+def test_parse_cookie_splits_browser_cookie_header() -> None:
+    assert douyin._parse_cookie("foo=bar; sessionid=secret; flag=true") == {
+        "foo": "bar",
+        "sessionid": "secret",
+        "flag": "true",
+    }
+
+
+@pytest.mark.asyncio
 async def test_fetch_latest_works_sorts_and_ignores_invalid_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -161,6 +212,7 @@ async def test_fetch_latest_works_sorts_and_ignores_invalid_items(
     params = FakeAsyncClient.last_request[1].get("params")
     assert isinstance(params, dict)
     assert params["sec_user_id"] == "MS4wLjABAAAA-test"
+    assert FakeAsyncClient.last_request[1]["cookies"] == {"ttwid": "test-ttwid"}
 
 
 @pytest.mark.asyncio

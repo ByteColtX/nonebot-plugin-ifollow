@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 
@@ -20,6 +21,10 @@ SHORT_LINK_RE = re.compile(r"https?://(?:v|jx)\.douyin\.com/[\w-]+")
 WORK_RE = re.compile(r"(?:https?://)?(?:www\.|m\.)?douyin\.com/video/(?P<aweme_id>\d+)")
 WORK_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 AUTHOR_PROFILE_URL = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+TTWID_REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
+
+_ttwid: str | None = None
+_ttwid_lock = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,9 @@ async def resolve_sec_user_id(value: str) -> str:
         timeout=20,
         verify=False,
     ) as client:
-        response = await client.get(matched.group(0))
+        response = await client.get(
+            matched.group(0), cookies=_parse_cookie(config.douyin_cookie)
+        )
         response.raise_for_status()
         final_url = str(response.url)
         if sec_user_id := extract_sec_user_id(final_url):
@@ -87,7 +94,7 @@ async def resolve_sec_user_id(value: str) -> str:
                 client, work_match.group("aweme_id")
             ):
                 return sec_user_id
-            page = await client.get(final_url)
+            page = await client.get(final_url, cookies=await _request_cookies())
             page.raise_for_status()
             if sec_user_id := _extract_sec_user_id_from_page(page.text):
                 return sec_user_id
@@ -101,6 +108,7 @@ async def _fetch_work_author(client: httpx.AsyncClient, aweme_id: str) -> str | 
     response = await client.get(
         WORK_DETAIL_URL,
         params={"aweme_id": aweme_id, "aid": "6383"},
+        cookies=await _request_cookies(),
     )
     response.raise_for_status()
     try:
@@ -157,7 +165,9 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
         verify=False,
     ) as client:
         response = await client.get(
-            "https://www.douyin.com/aweme/v1/web/aweme/post/", params=params
+            "https://www.douyin.com/aweme/v1/web/aweme/post/",
+            params=params,
+            cookies=await _request_cookies(),
         )
         try:
             response.raise_for_status()
@@ -234,6 +244,7 @@ async def fetch_author_profile(sec_user_id: str) -> tuple[str, str]:
         response = await client.get(
             AUTHOR_PROFILE_URL,
             params={"sec_user_id": sec_user_id, "aid": "6383"},
+            cookies=await _request_cookies(),
         )
         response.raise_for_status()
         try:
@@ -262,6 +273,75 @@ def _extract_unique_id(author: dict[str, object]) -> str:
     return short_id if short_id and short_id != "0" else ""
 
 
+async def _ensure_ttwid() -> str:
+    """参考 parser_lite 注册并缓存抖音的 ttwid Cookie。"""
+
+    global _ttwid
+
+    if _ttwid:
+        return _ttwid
+    async with _ttwid_lock:
+        if _ttwid:
+            return _ttwid
+        async with httpx.AsyncClient(
+            headers=_headers(),
+            follow_redirects=True,
+            timeout=20,
+            verify=False,
+        ) as client:
+            response = await client.post(
+                TTWID_REGISTER_URL,
+                json={
+                    "region": "cn",
+                    "aid": 1768,
+                    "needFid": False,
+                    "service": "www.douyin.com",
+                    "migrate_info": {"ticket": "", "source": "node"},
+                    "cbUrlProtocol": "https",
+                    "union": True,
+                },
+            )
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise DouyinRequestError(
+                    "抖音 ttwid 注册失败："
+                    f"HTTP {response.status_code}，响应内容："
+                    f"{_response_excerpt(response.text)}",
+                    retryable=True,
+                ) from exc
+            ttwid = response.cookies.get("ttwid")
+            if not ttwid:
+                raise DouyinRequestError(
+                    "抖音 ttwid 注册成功但未返回 Cookie",
+                    retryable=True,
+                )
+        _ttwid = ttwid
+        logger.debug("抖音 ttwid 注册成功")
+        return ttwid
+
+
+async def _request_cookies() -> dict[str, str]:
+    """组合配置 Cookie 与 parser_lite 风格的 ttwid Cookie。"""
+
+    cookies = _parse_cookie(config.douyin_cookie)
+    cookies["ttwid"] = await _ensure_ttwid()
+    return cookies
+
+
+def _parse_cookie(raw_cookie: str | None) -> dict[str, str]:
+    """把浏览器复制的 Cookie 请求头转换为键值字典。"""
+
+    if not raw_cookie:
+        return {}
+    cookies: dict[str, str] = {}
+    for item in raw_cookie.split(";"):
+        name, separator, value = item.strip().partition("=")
+        if separator and name:
+            cookies[name] = value
+    return cookies
+
+
 def _headers() -> dict[str, str]:
     headers = {
         "User-Agent": (
@@ -272,6 +352,4 @@ def _headers() -> dict[str, str]:
         "Origin": "https://open.douyin.com",
         "Accept": "application/json, text/plain, */*",
     }
-    if config.douyin_cookie:
-        headers["Cookie"] = config.douyin_cookie
     return headers
