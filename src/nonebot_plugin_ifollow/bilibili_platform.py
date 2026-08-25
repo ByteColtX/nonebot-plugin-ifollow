@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import httpx
 from bilibili_api import Credential
 from bilibili_api.user import User
 from bilibili_api.video import Video
@@ -12,10 +13,20 @@ from bilibili_api.video import Video
 from .config import config
 from .platforms import AuthorInfo, PlatformWork
 
-PROFILE_RE = re.compile(r"(?:https?://)?(?:www\.)?space\.bilibili\.com/(?P<mid>\d+)")
+PROFILE_RE = re.compile(
+    r"(?:https?://)?(?:(?:www\.)?space\.bilibili\.com/|m\.bilibili\.com/space/)"
+    r"(?P<mid>\d+)"
+)
 BV_RE = re.compile(r"(?P<bvid>BV[0-9A-Za-z]{10})")
 AV_RE = re.compile(r"(?:^|[/\s])av(?P<avid>\d+)(?:$|[/\s?&#])", re.IGNORECASE)
-SHORT_LINK_RE = re.compile(r"https?://b23\.tv/[\w-]+")
+SHORT_LINK_RE = re.compile(r"(?:https?://)?b23\.tv/[A-Za-z0-9_-]+")
+BILIBILI_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.bilibili.com/",
+}
 MAX_CATCHUP_PAGES = 5
 
 
@@ -67,6 +78,9 @@ async def resolve_bilibili_author(value: str) -> AuthorInfo:
     video = extract_bilibili_video(value)
     if video is None and SHORT_LINK_RE.search(value):
         value = await _resolve_short_link(value)
+        mid = extract_bilibili_mid(value)
+        if mid:
+            return await fetch_author_profile(mid)
         video = extract_bilibili_video(value)
     if video is None:
         raise ValueError("请输入 B 站作者主页、BV/AV 视频链接或 b23.tv 短链")
@@ -95,16 +109,20 @@ async def resolve_bilibili_author(value: str) -> AuthorInfo:
 async def _resolve_short_link(value: str) -> str:
     """解析 b23.tv 短链。"""
 
-    import httpx
-
     matched = SHORT_LINK_RE.search(value)
     if matched is None:
         return value
+    short_url = matched.group(0)
+    if not short_url.startswith(("http://", "https://")):
+        short_url = f"https://{short_url}"
     try:
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=20, verify=False
+            headers=BILIBILI_BROWSER_HEADERS,
+            follow_redirects=True,
+            timeout=20,
+            verify=False,
         ) as client:
-            response = await client.get(matched.group(0))
+            response = await client.get(short_url)
             response.raise_for_status()
             return str(response.url)
     except Exception as exc:

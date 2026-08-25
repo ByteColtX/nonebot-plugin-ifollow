@@ -148,4 +148,6 @@ class DouyinSubscribeParser(BaseParser):
         except (TypeError, ValueError):
             return None
         url = extra.get("original_song_url")
-        return str(url) if url else None
+        if not url:
+            return None
+        return str(url)
