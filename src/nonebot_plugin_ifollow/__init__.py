@@ -1,3 +1,5 @@
+"""爱播作者更新订阅插件。"""
+
 from nonebot import require
 from nonebot.plugin import PluginMetadata
 
@@ -7,15 +9,13 @@ require("nonebot_plugin_apscheduler")
 from .config import Config
 
 __plugin_meta__ = PluginMetadata(
-    name="抖音作者订阅",
-    description="订阅抖音作者新作品并通过 nonebot-plugin-parser 下载发送",
+    name="爱播作者订阅",
+    description="订阅抖音和 B 站作者的新作品及动态并发送",
     usage=(
-        "抖音订阅 <作者主页链接或 sec_user_id>\n"
-        "抖音订阅列表\n"
-        "抖音取消订阅 <作者主页链接或 sec_user_id>"
+        "爱播订阅 <作者主页或作品链接>\n爱播订阅列表\n爱播取消订阅 <作者主页或作品链接>"
     ),
     type="application",
-    homepage="https://github.com/ByteColtX/nonebot-plugin-douyin-subscribe",
+    homepage="https://github.com/ByteColtX/nonebot-plugin-ifollow",
     config=Config,
     supported_adapters={"~onebot.v11"},
     extra={"author": "ByteColtX <umk@live.com>"},

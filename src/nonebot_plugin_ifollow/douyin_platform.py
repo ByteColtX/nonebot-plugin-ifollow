@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass
 
 import httpx
 from nonebot import logger
 
 from .config import config
+from .platforms import AuthorInfo, PlatformWork
 
 PROFILE_RE = re.compile(
     r"(?:https?://)?(?:(?:www\.|m\.)?douyin\.com/user/"
@@ -25,18 +25,6 @@ TTWID_REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
 
 _ttwid: str | None = None
 _ttwid_lock = asyncio.Lock()
-
-
-@dataclass(frozen=True)
-class DouyinWork:
-    """抖音作品的最小信息。"""
-
-    aweme_id: str
-    share_url: str
-    description: str
-    create_time: int
-    author_name: str
-    author_unique_id: str = ""
 
 
 class DouyinRequestError(RuntimeError):
@@ -82,7 +70,7 @@ async def resolve_sec_user_id(value: str) -> str:
         verify=False,
     ) as client:
         response = await client.get(
-            matched.group(0), cookies=_parse_cookie(config.douyin_cookie)
+            matched.group(0), cookies=_parse_cookie(config.ifollow_douyin_cookie)
         )
         response.raise_for_status()
         final_url = str(response.url)
@@ -135,7 +123,7 @@ def _extract_sec_user_id_from_page(page_text: str) -> str | None:
     return matched.group("sec_user_id") if matched else None
 
 
-async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
+async def fetch_latest_works(sec_user_id: str) -> list[PlatformWork]:
     """读取作者最新作品，返回从新到旧的列表。"""
 
     params = {
@@ -145,7 +133,7 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
         "sec_user_id": sec_user_id,
         "max_cursor": "0",
         "locate_query": "false",
-        "count": str(config.douyin_subscribe_count),
+        "count": str(config.ifollow_subscribe_count),
         "publish_video_strategy_type": "2",
         "pc_client_type": "1",
         "version_code": "170400",
@@ -198,7 +186,7 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
     if not isinstance(raw_works, list):
         raise DouyinRequestError("抖音接口缺少 aweme_list")
 
-    works: list[DouyinWork] = []
+    works: list[PlatformWork] = []
     for raw in raw_works:
         if not isinstance(raw, dict):
             continue
@@ -211,16 +199,21 @@ async def fetch_latest_works(sec_user_id: str) -> list[DouyinWork]:
         author_name = str(author.get("nickname") or sec_user_id)
         author_unique_id = _extract_unique_id(author)
         works.append(
-            DouyinWork(
-                aweme_id=aweme_id,
-                share_url=f"https://www.douyin.com/video/{aweme_id}",
+            PlatformWork(
+                platform="douyin",
+                work_id=aweme_id,
+                url=f"https://www.douyin.com/video/{aweme_id}",
+                title=str(raw.get("desc") or ""),
                 description=str(raw.get("desc") or ""),
                 create_time=int(raw.get("create_time") or 0),
-                author_name=author_name,
-                author_unique_id=author_unique_id,
+                author=AuthorInfo(
+                    author_id=sec_user_id,
+                    name=author_name,
+                    handle=author_unique_id,
+                ),
             )
         )
-    works.sort(key=lambda work: (work.create_time, work.aweme_id), reverse=True)
+    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
     logger.debug(f"抖音作者 {sec_user_id} 拉取到 {len(works)} 个作品")
     return works
 
@@ -324,7 +317,7 @@ async def _ensure_ttwid() -> str:
 async def _request_cookies() -> dict[str, str]:
     """组合配置 Cookie 与 parser_lite 风格的 ttwid Cookie。"""
 
-    cookies = _parse_cookie(config.douyin_cookie)
+    cookies = _parse_cookie(config.ifollow_douyin_cookie)
     cookies["ttwid"] = await _ensure_ttwid()
     return cookies
 

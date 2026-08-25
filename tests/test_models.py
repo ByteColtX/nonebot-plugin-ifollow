@@ -1,83 +1,96 @@
 import json
-from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from nonebot_plugin_douyin_subscribe.models import SubscriptionStore, make_target_key
+from nonebot_plugin_ifollow.models import SubscriptionStore, make_target_key
 
 
 @pytest.mark.asyncio
-async def test_subscription_store_round_trip_and_remove(tmp_path: Path) -> None:
+async def test_multi_platform_round_trip_and_independent_cursors(
+    tmp_path: Path,
+) -> None:
     store = SubscriptionStore(tmp_path)
     target = {"id": "87654321", "private": False}
     target_key = make_target_key(target)
 
-    update_time = int(datetime(2026, 8, 25, 0, 20).timestamp())
     await store.upsert_target(
-        "user-id",
-        "作者",
+        "douyin",
+        "same-id",
+        "抖音作者",
         target_key,
         target,
-        "100",
-        "douyin_id",
-        update_time,
+        {"video": "aweme-1"},
+        "douyin-id",
+        100,
     )
+    await store.upsert_target(
+        "bilibili",
+        "same-id",
+        "B站作者",
+        target_key,
+        target,
+        {"video": "BV1", "dynamic": "dynamic-1"},
+        "same-id",
+        200,
+    )
+
     stored = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
-    assert stored["version"] == 2
-    assert isinstance(stored["authors"], list)
-    assert stored["authors"][0]["targets"][0]["target"] == {"id": "87654321"}
+    assert stored["version"] == 1
+    assert len(stored["subscriptions"]) == 2
 
     loaded = SubscriptionStore(tmp_path)
     snapshot = await loaded.snapshot()
-    assert snapshot["user-id"].author_name == "作者"
-    assert snapshot["user-id"].author_unique_id == "douyin_id"
-    assert snapshot["user-id"].last_update_time == update_time
-    assert snapshot["user-id"].targets[target_key].last_aweme_id == "100"
-    assert snapshot["user-id"].targets[target_key].target == {"id": "87654321"}
+    assert snapshot["douyin:same-id"].targets[target_key].cursors == {
+        "video": "aweme-1"
+    }
+    assert snapshot["bilibili:same-id"].targets[target_key].cursors == {
+        "video": "BV1",
+        "dynamic": "dynamic-1",
+    }
 
-    await loaded.update_cursor("user-id", target_key, "101")
-    assert (await loaded.snapshot())["user-id"].targets[
-        target_key
-    ].last_aweme_id == "101"
-
-    assert await loaded.remove_target("user-id", target_key)
-    assert await loaded.snapshot() == {}
-    assert not await loaded.remove_target("user-id", target_key)
+    await loaded.update_cursor(
+        "bilibili", "same-id", target_key, "dynamic", "dynamic-2"
+    )
+    assert (await loaded.snapshot())["bilibili:same-id"].targets[target_key].cursors[
+        "dynamic"
+    ] == "dynamic-2"
 
 
 @pytest.mark.asyncio
-async def test_add_target_does_not_overwrite_duplicate(tmp_path: Path) -> None:
+async def test_add_target_and_subscribers(tmp_path: Path) -> None:
     store = SubscriptionStore(tmp_path)
-    target = {"id": "87654321", "private": False}
+    target = {"id": "group"}
     target_key = make_target_key(target)
+    assert await store.add_target(
+        "bilibili",
+        "123",
+        "作者",
+        target_key,
+        target,
+        {"video": "BV1"},
+        subscriber_id="111",
+    )
+    assert not await store.add_target(
+        "bilibili", "123", "作者", target_key, target, {"video": "BV2"}
+    )
+    assert await store.add_subscriber("bilibili", "123", target_key, "222")
+    assert not await store.add_subscriber("bilibili", "123", target_key, "222")
 
-    assert await store.add_target("user-id", "作者", target_key, target, "100")
-    assert not await store.add_target("user-id", "作者", target_key, target, "200")
-
-    subscription = (await store.snapshot())["user-id"].targets[target_key]
-    assert subscription.last_aweme_id == "100"
+    assert await store.remove_subscriber("bilibili", "123", target_key, "111") == (
+        True,
+        False,
+    )
+    assert await store.remove_subscriber("bilibili", "123", target_key, "222") == (
+        True,
+        True,
+    )
+    assert await store.snapshot() == {}
 
 
 @pytest.mark.asyncio
-async def test_subscribers_are_added_and_removed_independently(tmp_path: Path) -> None:
-    store = SubscriptionStore(tmp_path)
-    target = {"id": "87654321", "private": False}
-    target_key = make_target_key(target)
-
-    assert await store.add_target("user-id", "作者", target_key, target, "100", "111")
-    assert await store.add_subscriber("user-id", target_key, "222")
-    assert not await store.add_subscriber("user-id", target_key, "222")
-
-    removed, target_removed = await store.remove_subscriber(
-        "user-id", target_key, "111"
+async def test_old_douyin_storage_is_not_migrated(tmp_path: Path) -> None:
+    (tmp_path / "subscriptions.json").write_text(
+        json.dumps({"version": 2, "authors": []}), encoding="utf-8"
     )
-    assert (removed, target_removed) == (True, False)
-    assert (await store.snapshot())["user-id"].targets[target_key].subscriber_ids == [
-        "222"
-    ]
-
-    removed, target_removed = await store.remove_subscriber(
-        "user-id", target_key, "222"
-    )
-    assert (removed, target_removed) == (True, True)
+    assert await SubscriptionStore(tmp_path).snapshot() == {}

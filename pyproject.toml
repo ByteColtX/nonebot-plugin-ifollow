@@ -1,7 +1,7 @@
 [project]
-name = "nonebot-plugin-douyin-subscribe"
+name = "nonebot-plugin-ifollow"
 version = "0.1.0"
-description = "NoneBot2 抖音作者更新订阅插件"
+description = "NoneBot2 多平台作者更新订阅插件"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "ByteColtX", email = "umk@live.com" }]
@@ -16,9 +16,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ByteColtX/nonebot-plugin-douyin-subscribe"
-Issues = "https://github.com/ByteColtX/nonebot-plugin-douyin-subscribe/issues"
-Repository = "https://github.com/ByteColtX/nonebot-plugin-douyin-subscribe.git"
+Homepage = "https://github.com/ByteColtX/nonebot-plugin-ifollow"
+Issues = "https://github.com/ByteColtX/nonebot-plugin-ifollow/issues"
+Repository = "https://github.com/ByteColtX/nonebot-plugin-ifollow.git"
 
 [dependency-groups]
 dev = [
@@ -38,7 +38,7 @@ requires = ["uv_build>=0.10.0,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.nonebot]
-plugins = ["nonebot_plugin_douyin_subscribe"]
+plugins = ["nonebot_plugin_ifollow"]
 
 [tool.poe.tasks]
 test = "pytest --cov=src --cov-report=xml --junitxml=./junit.xml -n auto"
@@ -53,8 +53,8 @@ tag = true
 
 [[tool.bumpversion.files]]
 filename = "uv.lock"
-search = "name = \"nonebot-plugin-douyin-subscribe\"\nversion = \"{current_version}\""
-replace = "name = \"nonebot-plugin-douyin-subscribe\"\nversion = \"{new_version}\""
+search = "name = \"nonebot-plugin-ifollow\"\nversion = \"{current_version}\""
+replace = "name = \"nonebot-plugin-ifollow\"\nversion = \"{new_version}\""
 
 [tool.pytest]
 pythonpath = ["src", "tests"]

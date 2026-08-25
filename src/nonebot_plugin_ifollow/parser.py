@@ -18,7 +18,7 @@ require("nonebot_plugin_parser")
 from nonebot_plugin_parser.parsers import BaseParser, Platform, handle
 from nonebot_plugin_parser.parsers.douyin.aweme import decoder
 
-from .douyin import _request_cookies
+from .douyin_platform import _request_cookies
 
 
 class DouyinSubscribeParser(BaseParser):

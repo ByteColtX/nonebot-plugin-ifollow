@@ -1,4 +1,4 @@
-"""订阅数据模型和 JSON 持久化。"""
+"""爱播订阅数据模型和 JSON 持久化。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,13 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Literal
 
 from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_dir
+
+Platform = Literal["douyin", "bilibili"]
+STORAGE_VERSION = 1
 
 _TARGET_KEY_FIELDS = (
     "id",
@@ -68,23 +71,30 @@ class TargetSubscription:
     """一个目标会话的订阅状态。"""
 
     target: dict[str, Any]
-    last_aweme_id: str | None = None
+    cursors: dict[str, str | None] = field(default_factory=dict)
     subscriber_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
 class AuthorSubscription:
-    """一个抖音作者及其订阅目标。"""
+    """一个平台作者及其订阅目标。"""
 
-    sec_user_id: str
+    platform: Platform
+    author_id: str
     author_name: str
     targets: dict[str, TargetSubscription] = field(default_factory=dict)
-    author_unique_id: str = ""
+    author_handle: str = ""
     last_update_time: int = 0
+
+    @property
+    def key(self) -> str:
+        """返回跨平台唯一作者键。"""
+
+        return f"{self.platform}:{self.author_id}"
 
 
 class SubscriptionStore:
-    """以 JSON 文件保存订阅信息。"""
+    """以 JSON 文件保存多平台订阅信息。"""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path / "subscriptions.json" if path else None
@@ -93,6 +103,8 @@ class SubscriptionStore:
         self._loaded = False
 
     async def load(self) -> None:
+        """加载订阅数据。"""
+
         async with self._lock:
             self._load_unlocked()
 
@@ -105,55 +117,75 @@ class SubscriptionStore:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            if raw.get("version") != 2 or not isinstance(raw.get("authors"), list):
-                raise ValueError("不支持的订阅数据结构")
-            for item in raw["authors"]:
-                if not isinstance(item, dict):
-                    raise TypeError("作者数据必须是对象")
-                sec_user_id = str(item["sec_user_id"])
-                targets: dict[str, TargetSubscription] = {}
-                for target_item in item.get("targets", []):
-                    if not isinstance(target_item, dict):
-                        raise TypeError("目标数据必须是对象")
-                    target = target_item["target"]
-                    if not isinstance(target, dict):
-                        raise TypeError("目标信息必须是对象")
-                    subscribers = target_item.get("subscribers", [])
-                    if not isinstance(subscribers, list):
-                        raise TypeError("订阅人必须是数组")
-                    cursor = target_item.get("cursor")
-                    target_key = make_target_key(target)
-                    targets[target_key] = TargetSubscription(
-                        target=target,
-                        last_aweme_id=str(cursor) if cursor is not None else None,
-                        subscriber_ids=[str(value) for value in subscribers],
-                    )
-                self._authors[sec_user_id] = AuthorSubscription(
-                    sec_user_id=sec_user_id,
-                    author_name=str(item.get("name") or sec_user_id),
-                    targets=targets,
-                    author_unique_id=str(item.get("unique_id") or ""),
-                    last_update_time=int(item.get("updated_at") or 0),
-                )
+            if (
+                not isinstance(raw, dict)
+                or raw.get("version") != STORAGE_VERSION
+                or not isinstance(raw.get("subscriptions"), list)
+            ):
+                raise ValueError("不支持的爱播订阅数据结构")
+            for item in raw["subscriptions"]:
+                self._load_author(item)
         except (OSError, TypeError, ValueError, KeyError) as exc:
-            logger.warning(f"抖音订阅数据读取失败，将使用空订阅: {exc}")
+            logger.warning(f"爱播订阅数据读取失败，将使用空订阅: {exc}")
+
+    def _load_author(self, item: Any) -> None:
+        if not isinstance(item, dict):
+            raise TypeError("订阅作者必须是对象")
+        platform = item["platform"]
+        author_id = str(item["author_id"])
+        if platform not in ("douyin", "bilibili") or not author_id:
+            raise ValueError("订阅作者的平台或 ID 无效")
+        targets: dict[str, TargetSubscription] = {}
+        for target_item in item.get("targets", []):
+            if not isinstance(target_item, dict):
+                raise TypeError("目标订阅必须是对象")
+            target = target_item["target"]
+            if not isinstance(target, dict):
+                raise TypeError("目标信息必须是对象")
+            cursors = target_item.get("cursors", {})
+            if not isinstance(cursors, dict):
+                raise TypeError("订阅游标必须是对象")
+            subscribers = target_item.get("subscribers", [])
+            if not isinstance(subscribers, list):
+                raise TypeError("订阅人必须是数组")
+            target_key = make_target_key(target)
+            targets[target_key] = TargetSubscription(
+                target=target,
+                cursors={
+                    str(feed): str(cursor) if cursor is not None else None
+                    for feed, cursor in cursors.items()
+                },
+                subscriber_ids=[str(value) for value in subscribers],
+            )
+        author = AuthorSubscription(
+            platform=platform,
+            author_id=author_id,
+            author_name=str(item.get("name") or author_id),
+            targets=targets,
+            author_handle=str(item.get("handle") or ""),
+            last_update_time=int(item.get("updated_at") or 0),
+        )
+        self._authors[author.key] = author
 
     async def snapshot(self) -> dict[str, AuthorSubscription]:
+        """返回订阅数据的深拷贝快照。"""
+
         async with self._lock:
             self._load_unlocked()
             return {
                 key: AuthorSubscription(
-                    sec_user_id=value.sec_user_id,
+                    platform=value.platform,
+                    author_id=value.author_id,
                     author_name=value.author_name,
                     targets={
                         target_key: TargetSubscription(
                             target.target.copy(),
-                            target.last_aweme_id,
+                            dict(target.cursors),
                             list(target.subscriber_ids),
                         )
                         for target_key, target in value.targets.items()
                     },
-                    author_unique_id=value.author_unique_id,
+                    author_handle=value.author_handle,
                     last_update_time=value.last_update_time,
                 )
                 for key, value in self._authors.items()
@@ -161,85 +193,94 @@ class SubscriptionStore:
 
     async def upsert_target(
         self,
-        sec_user_id: str,
+        platform: Platform,
+        author_id: str,
         author_name: str,
         target_key: str,
         target: dict[str, Any],
-        last_aweme_id: str | None,
-        author_unique_id: str = "",
+        cursors: dict[str, str | None],
+        author_handle: str = "",
         last_update_time: int = 0,
     ) -> None:
+        """写入一个目标订阅，主要用于测试和恢复状态。"""
+
         async with self._lock:
             self._load_unlocked()
             author = self._authors.setdefault(
-                sec_user_id, AuthorSubscription(sec_user_id, author_name)
+                f"{platform}:{author_id}",
+                AuthorSubscription(platform, author_id, author_name),
             )
             author.author_name = author_name or author.author_name
-            author.author_unique_id = author_unique_id or author.author_unique_id
+            author.author_handle = author_handle or author.author_handle
             author.last_update_time = max(author.last_update_time, last_update_time)
-            author.targets[target_key] = TargetSubscription(target, last_aweme_id)
+            author.targets[target_key] = TargetSubscription(target, dict(cursors))
             self._save_unlocked()
 
     async def add_target(
         self,
-        sec_user_id: str,
+        platform: Platform,
+        author_id: str,
         author_name: str,
         target_key: str,
         target: dict[str, Any],
-        last_aweme_id: str | None,
+        cursors: dict[str, str | None],
         subscriber_id: str | None = None,
-        author_unique_id: str = "",
+        author_handle: str = "",
         last_update_time: int = 0,
     ) -> bool:
         """新增订阅目标；目标已存在时不覆盖并返回 False。"""
 
         async with self._lock:
             self._load_unlocked()
-            author = self._authors.get(sec_user_id)
+            author_key = f"{platform}:{author_id}"
+            author = self._authors.get(author_key)
             if author and target_key in author.targets:
                 return False
             author = self._authors.setdefault(
-                sec_user_id, AuthorSubscription(sec_user_id, author_name)
+                author_key,
+                AuthorSubscription(platform, author_id, author_name),
             )
             author.author_name = author_name or author.author_name
-            author.author_unique_id = author_unique_id or author.author_unique_id
+            author.author_handle = author_handle or author.author_handle
             author.last_update_time = max(author.last_update_time, last_update_time)
-            subscriber_ids = [subscriber_id] if subscriber_id else []
             author.targets[target_key] = TargetSubscription(
-                target, last_aweme_id, subscriber_ids
+                target,
+                dict(cursors),
+                [subscriber_id] if subscriber_id else [],
             )
             self._save_unlocked()
             return True
 
     async def update_author_metadata(
         self,
-        sec_user_id: str,
+        platform: Platform,
+        author_id: str,
         author_name: str,
-        author_unique_id: str,
+        author_handle: str,
         last_update_time: int,
     ) -> None:
-        """更新作者缓存信息，供订阅列表脱离网络请求使用。"""
+        """更新作者缓存信息。"""
 
         async with self._lock:
             self._load_unlocked()
-            author = self._authors.get(sec_user_id)
+            author = self._authors.get(f"{platform}:{author_id}")
             if author is None:
                 return
             author.author_name = author_name or author.author_name
-            author.author_unique_id = author_unique_id or author.author_unique_id
+            author.author_handle = author_handle or author.author_handle
             author.last_update_time = max(author.last_update_time, last_update_time)
             self._save_unlocked()
 
     async def add_subscriber(
-        self, sec_user_id: str, target_key: str, subscriber_id: str
+        self, platform: Platform, author_id: str, target_key: str, subscriber_id: str
     ) -> bool:
-        """为已有订阅新增订阅人，返回是否实际新增。"""
+        """为已有订阅新增订阅人。"""
 
         if not subscriber_id:
             return False
         async with self._lock:
             self._load_unlocked()
-            author = self._authors.get(sec_user_id)
+            author = self._authors.get(f"{platform}:{author_id}")
             target = author.targets.get(target_key) if author else None
             if target is None or subscriber_id in target.subscriber_ids:
                 return False
@@ -248,13 +289,17 @@ class SubscriptionStore:
             return True
 
     async def remove_subscriber(
-        self, sec_user_id: str, target_key: str, subscriber_id: str
+        self,
+        platform: Platform,
+        author_id: str,
+        target_key: str,
+        subscriber_id: str,
     ) -> tuple[bool, bool]:
         """移除一个订阅人，返回（是否移除、是否删除整个目标）。"""
 
         async with self._lock:
             self._load_unlocked()
-            author = self._authors.get(sec_user_id)
+            author = self._authors.get(f"{platform}:{author_id}")
             if author is None:
                 return False, False
             target = author.targets.get(target_key)
@@ -263,7 +308,7 @@ class SubscriptionStore:
             if not target.subscriber_ids:
                 del author.targets[target_key]
                 if not author.targets:
-                    del self._authors[sec_user_id]
+                    del self._authors[author.key]
                 self._save_unlocked()
                 return True, True
             if subscriber_id not in target.subscriber_ids:
@@ -274,37 +319,49 @@ class SubscriptionStore:
                 return True, False
             del author.targets[target_key]
             if not author.targets:
-                del self._authors[sec_user_id]
+                del self._authors[author.key]
             self._save_unlocked()
             return True, True
 
-    async def remove_target(self, sec_user_id: str, target_key: str) -> bool:
+    async def remove_target(
+        self, platform: Platform, author_id: str, target_key: str
+    ) -> bool:
+        """删除一个目标订阅。"""
+
         async with self._lock:
             self._load_unlocked()
-            author = self._authors.get(sec_user_id)
+            author = self._authors.get(f"{platform}:{author_id}")
             if not author or target_key not in author.targets:
                 return False
             del author.targets[target_key]
             if not author.targets:
-                del self._authors[sec_user_id]
+                del self._authors[author.key]
             self._save_unlocked()
             return True
 
     async def update_cursor(
-        self, sec_user_id: str, target_key: str, aweme_id: str
+        self,
+        platform: Platform,
+        author_id: str,
+        target_key: str,
+        feed: str,
+        cursor: str,
     ) -> None:
+        """更新目标指定 feed 的游标。"""
+
         async with self._lock:
             self._load_unlocked()
-            author = self._authors.get(sec_user_id)
-            if author and (target := author.targets.get(target_key)):
-                target.last_aweme_id = aweme_id
+            author = self._authors.get(f"{platform}:{author_id}")
+            target = author.targets.get(target_key) if author else None
+            if target is not None:
+                target.cursors[feed] = cursor
                 self._save_unlocked()
 
     def _save_unlocked(self) -> None:
         path = self._get_path()
         payload = {
-            "version": 2,
-            "authors": [
+            "version": STORAGE_VERSION,
+            "subscriptions": [
                 self._serialize_author(author) for author in self._authors.values()
             ],
         }
@@ -319,21 +376,22 @@ class SubscriptionStore:
 
     @staticmethod
     def _serialize_author(author: AuthorSubscription) -> dict[str, Any]:
-        """将作者模型转换为精简的 JSON 结构。"""
+        """将作者模型转换为精简 JSON 结构。"""
 
         item: dict[str, Any] = {
-            "sec_user_id": author.sec_user_id,
+            "platform": author.platform,
+            "author_id": author.author_id,
             "name": author.author_name,
             "targets": [],
         }
-        if author.author_unique_id:
-            item["unique_id"] = author.author_unique_id
+        if author.author_handle:
+            item["handle"] = author.author_handle
         if author.last_update_time:
             item["updated_at"] = author.last_update_time
         for target in author.targets.values():
             target_item: dict[str, Any] = {"target": _compact_target(target.target)}
-            if target.last_aweme_id is not None:
-                target_item["cursor"] = target.last_aweme_id
+            if target.cursors:
+                target_item["cursors"] = target.cursors
             if target.subscriber_ids:
                 target_item["subscribers"] = target.subscriber_ids
             item["targets"].append(target_item)
