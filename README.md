@@ -1,6 +1,6 @@
 <div align="center">
     <a href="https://v2.nonebot.dev/store">
-    <img src="https://raw.githubusercontent.com/nonebot/nonebot2/master/.docs/NoneBotPlugin.svg" width="310" alt="logo"></a>
+    <img src="https://raw.githubusercontent.com/fllesser/nonebot-plugin-template/refs/heads/resource/.docs/NoneBotPlugin.svg" width="310" alt="logo"></a>
 
 ## ✨ nonebot-plugin-ifollow ✨
 [![LICENSE](https://img.shields.io/github/license/ByteColtX/nonebot-plugin-ifollow.svg)](./LICENSE)
