@@ -2,14 +2,14 @@
     <a href="https://v2.nonebot.dev/store">
     <img src="https://raw.githubusercontent.com/nonebot/nonebot2/master/.docs/NoneBotPlugin.svg" width="310" alt="logo"></a>
 
-## ✨ nonebot-plugin-douyin-subscribe ✨
+## ✨ nonebot-plugin-ifollow ✨
 [![LICENSE](https://img.shields.io/github/license/ByteColtX/nonebot-plugin-ifollow.svg)](./LICENSE)
 [![pypi](https://img.shields.io/pypi/v/nonebot-plugin-ifollow.svg)](https://pypi.org/project/nonebot-plugin-ifollow/)
 [![python](https://img.shields.io/badge/python-3.10|3.11|3.12|3.13|3.14-blue.svg)](https://www.python.org)
 [![uv](https://img.shields.io/badge/package%20manager-uv-black?style=flat-square&logo=uv)](https://github.com/astral-sh/uv)
 <br/>
 [![ruff](https://img.shields.io/badge/code%20style-ruff-black?style=flat-square&logo=ruff)](https://github.com/astral-sh/ruff)
-[![pre-commit](https://results.pre-commit.ci/badge/github/ByteColtX/nonebot-plugin-douyin-subscribe/master.svg)](https://results.pre-commit.ci/latest/github/ByteColtX/nonebot-plugin-douyin-subscribe/master)
+[![pre-commit](https://results.pre-commit.ci/badge/github/ByteColtX/nonebot-plugin-ifollow/main.svg)](https://results.pre-commit.ci/latest/github/ByteColtX/nonebot-plugin-ifollow/main)
 
 </div>
 
@@ -45,26 +45,26 @@
 <summary>uv</summary>
 
     uv add nonebot-plugin-ifollow
-安装仓库 master 分支
+安装仓库 main 分支
 
-    uv add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@master
+    uv add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
 </details>
 
 <details>
 <summary>pdm</summary>
 
     pdm add nonebot-plugin-ifollow
-安装仓库 master 分支
+安装仓库 main 分支
 
-    pdm add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@master
+    pdm add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
 </details>
 <details>
 <summary>poetry</summary>
 
     poetry add nonebot-plugin-ifollow
-安装仓库 master 分支
+安装仓库 main 分支
 
-    poetry add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@master
+    poetry add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
 </details>
 
 打开 nonebot2 项目根目录下的 `pyproject.toml` 文件, 在 `[tool.nonebot]` 部分追加写入
