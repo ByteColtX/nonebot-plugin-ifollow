@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from nonebot_plugin_alconna.uniseg import Target
@@ -154,6 +154,67 @@ def test_format_handle() -> None:
     bili = AuthorSubscription("bilibili", "123", "作者", author_handle="123")
     assert plugin._format_handle(douyin) == "@handle"
     assert plugin._format_handle(bili) == "UID:123"
+
+
+@pytest.mark.asyncio
+async def test_help_command_sends_help_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[str] = []
+
+    class FakeUniMessage:
+        def __init__(self, message: str) -> None:
+            sent.append(message)
+
+        async def send(self, *, target: Target, bot: object) -> None:
+            del target, bot
+
+    monkeypatch.setattr(plugin, "UniMessage", FakeUniMessage)
+    monkeypatch.setattr(
+        plugin, "get_target", lambda _event, _bot: Target.group("group")
+    )
+
+    await plugin.help_command(Mock(), Mock())
+
+    assert sent == [plugin.HELP_MESSAGE]
+    assert "爱播取消订阅 <序号或作者主页/作品链接>" in sent[0]
+
+
+def test_target_subscriptions_preserve_list_order() -> None:
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    authors = {
+        "douyin:1": AuthorSubscription(
+            "douyin", "1", "第一个", {target_key: TargetSubscription(target.dump())}
+        ),
+        "bilibili:2": AuthorSubscription(
+            "bilibili", "2", "第二个", {target_key: TargetSubscription(target.dump())}
+        ),
+        "douyin:3": AuthorSubscription("douyin", "3", "其他会话"),
+    }
+
+    items = plugin._target_subscriptions(authors, target_key)
+
+    assert [author.author_id for author in items] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_load_subscriptions_on_startup_logs_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SubscriptionStore(tmp_path)
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    await store.upsert_target(
+        "douyin", "123", "作者", target_key, target.dump(), {"video": "old"}
+    )
+    startup_logger = Mock()
+    monkeypatch.setattr(plugin, "store", store)
+    monkeypatch.setattr(plugin, "logger", startup_logger)
+
+    await plugin.load_subscriptions_on_startup()
+
+    startup_logger.info.assert_called_once_with(
+        "成功加载 1 个爱播作者订阅，覆盖 1 个会话。"
+    )
 
 
 def test_backoff_is_capped() -> None:

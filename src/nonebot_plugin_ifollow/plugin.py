@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
-from nonebot import logger, on_command
+from nonebot import get_driver, logger, on_command
 from nonebot.adapters import Bot, Event, Message
 from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
@@ -47,6 +47,7 @@ from .parser import DouyinSubscribeParser
 from .platforms import AuthorInfo, PlatformWork
 
 store = SubscriptionStore()
+driver = get_driver()
 poll_lock = asyncio.Lock()
 author_poll_states: dict[str, AuthorPollState] = {}
 send_retry_attempts: dict[tuple[str, str, str, str, str], int] = {}
@@ -55,6 +56,14 @@ POLL_BACKOFF_BASE_SECONDS = 30.0
 POLL_BACKOFF_MAX_SECONDS = 300.0
 SEND_BACKOFF_BASE_SECONDS = 30.0
 SEND_BACKOFF_MAX_SECONDS = 300.0
+HELP_MESSAGE = (
+    "爱播帮助：\n"
+    "爱播订阅 <抖音或 B 站作者主页/作品链接>\n"
+    "爱播订阅列表（别名：爱播列表）\n"
+    "爱播取消订阅 <序号或作者主页/作品链接>\n"
+    "也可引用包含链接的消息后发送 爱播订阅。\n"
+    "支持抖音和 B 站；首次订阅不会补发历史内容。"
+)
 
 
 @dataclass
@@ -63,6 +72,23 @@ class AuthorPollState:
 
     failure_count: int = 0
     retry_at: float = 0.0
+
+
+@driver.on_startup
+async def load_subscriptions_on_startup() -> None:
+    """在 NoneBot 启动时加载订阅并输出统计信息。"""
+
+    await store.load()
+    authors = await store.snapshot()
+    target_count = sum(len(author.targets) for author in authors.values())
+    logger.info(f"成功加载 {len(authors)} 个爱播作者订阅，覆盖 {target_count} 个会话。")
+
+
+@on_command("爱播帮助", aliases={"帮助爱播"}, priority=5, block=True).handle()
+async def help_command(event: Event, bot: Bot) -> None:
+    """显示爱播命令帮助。"""
+
+    await UniMessage(HELP_MESSAGE).send(target=get_target(event, bot), bot=bot)
 
 
 @on_command("爱播订阅", aliases={"订阅爱播"}, priority=5, block=True).handle()
@@ -158,15 +184,29 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
 
     value = args.extract_plain_text().strip()
     if not value:
-        await UniMessage("用法：爱播取消订阅 <作者主页链接或作品链接>").finish()
-    try:
-        platform, author = await _resolve_author(value)
-    except Exception as exc:
-        await UniMessage(f"取消失败：{exc}").finish()
-
+        await UniMessage("用法：爱播取消订阅 <序号、作者主页链接或作品链接>").finish()
     target = get_target(event, bot)
+    target_key = _target_key(target)
+    if value.isdecimal():
+        authors = await store.snapshot()
+        items = _target_subscriptions(authors, target_key)
+        if not items:
+            await UniMessage("当前会话没有爱播订阅。").finish()
+        index = int(value)
+        if not 1 <= index <= len(items):
+            await UniMessage(f"序号无效，请输入 1 到 {len(items)}。").finish()
+        selected = items[index - 1]
+        platform = selected.platform
+        author_id = selected.author_id
+    else:
+        try:
+            platform, author = await _resolve_author(value)
+        except Exception as exc:
+            await UniMessage(f"取消失败：{exc}").finish()
+        author_id = author.author_id
+
     removed, target_removed = await store.remove_subscriber(
-        platform, author.author_id, _target_key(target), event.get_user_id()
+        platform, author_id, target_key, event.get_user_id()
     )
     if removed and target_removed:
         await UniMessage("已取消订阅。").send(target=target, bot=bot)
@@ -185,7 +225,7 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
     target = get_target(event, bot)
     target_key = _target_key(target)
     authors = await store.snapshot()
-    items = [author for author in authors.values() if target_key in author.targets]
+    items = _target_subscriptions(authors, target_key)
     if not items:
         message = "当前会话没有爱播订阅。"
     else:
@@ -486,6 +526,14 @@ def _exponential_backoff_seconds(
 
 def _target_key(target: Target) -> str:
     return make_target_key(target.dump())
+
+
+def _target_subscriptions(
+    authors: dict[str, AuthorSubscription], target_key: str
+) -> list[AuthorSubscription]:
+    """返回当前会话的订阅，顺序与订阅列表命令一致。"""
+
+    return [author for author in authors.values() if target_key in author.targets]
 
 
 def _platform_name(platform: str) -> str:
