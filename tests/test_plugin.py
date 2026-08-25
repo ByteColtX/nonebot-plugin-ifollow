@@ -87,6 +87,76 @@ async def test_deliver_new_works_keeps_cursor_when_parser_fails(
     ].last_aweme_id == "100"
 
 
+@pytest.mark.asyncio
+async def test_poll_continues_when_an_author_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authors = {
+        "failed-author": AuthorSubscription("failed-author", "失败作者"),
+        "healthy-author": AuthorSubscription("healthy-author", "正常作者"),
+    }
+
+    class FakeStore:
+        async def snapshot(self) -> dict[str, AuthorSubscription]:
+            return authors
+
+    calls: list[str] = []
+
+    async def poll_author(author: AuthorSubscription) -> None:
+        calls.append(author.sec_user_id)
+        if author.sec_user_id == "failed-author":
+            raise subscribe_plugin.DouyinRequestError(
+                "temporary failure", retryable=True
+            )
+
+    async def skip_delay(_delay: float) -> None:
+        return
+
+    monkeypatch.setattr(subscribe_plugin, "store", FakeStore())
+    monkeypatch.setattr(subscribe_plugin, "_poll_author", poll_author)
+    monkeypatch.setattr(subscribe_plugin.asyncio, "sleep", skip_delay)
+    subscribe_plugin.author_poll_states.clear()
+
+    await subscribe_plugin.poll_subscriptions()
+
+    assert calls == ["failed-author", "healthy-author"]
+    assert subscribe_plugin.author_poll_states["failed-author"].failure_count == 1
+    assert "healthy-author" not in subscribe_plugin.author_poll_states
+
+
+@pytest.mark.asyncio
+async def test_poll_skips_only_author_in_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authors = {
+        "failed-author": AuthorSubscription("failed-author", "失败作者"),
+        "healthy-author": AuthorSubscription("healthy-author", "正常作者"),
+    }
+
+    class FakeStore:
+        async def snapshot(self) -> dict[str, AuthorSubscription]:
+            return authors
+
+    calls: list[str] = []
+
+    async def poll_author(author: AuthorSubscription) -> None:
+        calls.append(author.sec_user_id)
+
+    monkeypatch.setattr(subscribe_plugin, "store", FakeStore())
+    monkeypatch.setattr(subscribe_plugin, "_poll_author", poll_author)
+    subscribe_plugin.author_poll_states.clear()
+    subscribe_plugin.author_poll_states["failed-author"] = (
+        subscribe_plugin.AuthorPollState(
+            failure_count=2,
+            retry_at=subscribe_plugin.time.monotonic() + 60,
+        )
+    )
+
+    await subscribe_plugin.poll_subscriptions()
+
+    assert calls == ["healthy-author"]
+
+
 def test_extract_reply_id_and_message_text() -> None:
     message = Message([MessageSegment.reply(800001)])
 

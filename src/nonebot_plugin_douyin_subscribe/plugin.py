@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -34,14 +34,21 @@ from .parser import DouyinSubscribeParser
 
 store = SubscriptionStore()
 poll_lock = asyncio.Lock()
-poll_backoff_until = 0.0
-poll_failure_count = 0
+author_poll_states: dict[str, AuthorPollState] = {}
 send_retry_attempts: dict[tuple[str, str, str], int] = {}
 send_retry_until: dict[tuple[str, str, str], float] = {}
 POLL_BACKOFF_BASE_SECONDS = 30.0
 POLL_BACKOFF_MAX_SECONDS = 300.0
 SEND_BACKOFF_BASE_SECONDS = 30.0
 SEND_BACKOFF_MAX_SECONDS = 300.0
+
+
+@dataclass
+class AuthorPollState:
+    """记录单个作者的轮询失败和下一次重试时间。"""
+
+    failure_count: int = 0
+    retry_at: float = 0.0
 
 
 @get_driver().on_startup
@@ -203,75 +210,83 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
 async def poll_subscriptions() -> None:
     """轮询作者作品并向订阅目标发送新作品。"""
 
-    global poll_backoff_until, poll_failure_count
-
-    now = time.monotonic()
-    if now < poll_backoff_until:
-        remaining = math.ceil(poll_backoff_until - now)
-        logger.warning(f"抖音接口暂时受限，轮询暂停，预计 {remaining} 秒后重试")
-        return
     if poll_lock.locked():
         logger.warning("上一次抖音订阅轮询尚未完成，本次跳过")
         return
     async with poll_lock:
         authors = await store.snapshot()
+        active_author_ids = set(authors)
+        for sec_user_id in set(author_poll_states) - active_author_ids:
+            author_poll_states.pop(sec_user_id, None)
         request_delay = max(
             1.0, config.douyin_subscribe_interval / max(len(authors), 1)
         )
         for index, author in enumerate(authors.values()):
+            state = author_poll_states.setdefault(author.sec_user_id, AuthorPollState())
+            if time.monotonic() < state.retry_at:
+                continue
             try:
-                works = await fetch_latest_works(author.sec_user_id)
+                await _poll_author(author)
             except DouyinRequestError as exc:
-                logger.warning(f"抖音作者 {author.sec_user_id} 轮询失败：{exc}")
-                delay = _record_poll_failure()
-                logger.warning(
-                    f"抖音轮询第 {poll_failure_count} 次失败，{delay:.0f} 秒后重试"
+                attempt, delay = _record_author_failure(
+                    author.sec_user_id, retryable=exc.retryable
                 )
-                break
+                logger.warning(
+                    f"抖音作者 {author.sec_user_id} 轮询失败：{exc}；"
+                    f"第 {attempt} 次重试将在 {delay:.0f} 秒后进行"
+                )
             except Exception:
+                attempt, delay = _record_author_failure(author.sec_user_id)
                 logger.opt(exception=True).warning(
-                    f"抖音作者 {author.sec_user_id} 轮询失败"
+                    f"抖音作者 {author.sec_user_id} 轮询失败；"
+                    f"第 {attempt} 次重试将在 {delay:.0f} 秒后进行"
                 )
-                delay = _record_poll_failure()
-                logger.warning(
-                    f"抖音轮询第 {poll_failure_count} 次失败，{delay:.0f} 秒后重试"
-                )
-                break
-            if works:
-                latest = works[0]
-                author_name, author_unique_id = await _get_author_metadata(
-                    author.sec_user_id,
-                    latest,
-                    author.author_unique_id,
-                )
-                await store.update_author_metadata(
-                    author.sec_user_id,
-                    author_name,
-                    author_unique_id,
-                    latest.create_time,
-                )
-                for target_key, target_state in author.targets.items():
-                    await _deliver_new_works(author, target_key, target_state, works)
+            else:
+                author_poll_states.pop(author.sec_user_id, None)
             if index < len(authors) - 1:
                 await asyncio.sleep(request_delay)
-        else:
-            poll_failure_count = 0
-            poll_backoff_until = 0.0
 
 
-def _record_poll_failure() -> float:
-    """记录一次轮询失败并返回下一次重试前的等待时间。"""
+async def _poll_author(author: AuthorSubscription) -> None:
+    """轮询单个作者并向其订阅目标发送新作品。"""
 
-    global poll_backoff_until, poll_failure_count
+    works = await fetch_latest_works(author.sec_user_id)
+    if not works:
+        return
 
-    poll_failure_count += 1
-    delay = _exponential_backoff_seconds(
-        poll_failure_count,
-        base_seconds=POLL_BACKOFF_BASE_SECONDS,
-        max_seconds=POLL_BACKOFF_MAX_SECONDS,
+    latest = works[0]
+    author_name, author_unique_id = await _get_author_metadata(
+        author.sec_user_id,
+        latest,
+        author.author_unique_id,
     )
-    poll_backoff_until = time.monotonic() + delay
-    return delay
+    await store.update_author_metadata(
+        author.sec_user_id,
+        author_name,
+        author_unique_id,
+        latest.create_time,
+    )
+    for target_key, target_state in author.targets.items():
+        await _deliver_new_works(author, target_key, target_state, works)
+
+
+def _record_author_failure(
+    sec_user_id: str, *, retryable: bool = True
+) -> tuple[int, float]:
+    """记录作者级轮询失败，返回失败次数和下一次重试等待时间。"""
+
+    state = author_poll_states.setdefault(sec_user_id, AuthorPollState())
+    state.failure_count += 1
+    if retryable:
+        delay = _exponential_backoff_seconds(
+            state.failure_count,
+            base_seconds=POLL_BACKOFF_BASE_SECONDS,
+            max_seconds=POLL_BACKOFF_MAX_SECONDS,
+        )
+    else:
+        delay = max(config.douyin_subscribe_interval, POLL_BACKOFF_MAX_SECONDS)
+    state.retry_at = time.monotonic() + delay
+    return state.failure_count, delay
 
 
 def _exponential_backoff_seconds(
