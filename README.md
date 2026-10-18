@@ -97,7 +97,7 @@
 | :--- | :---: | :---: | :--- |
 | `IFOLLOW_SUBSCRIBE_INTERVAL` | 否 | `300` | 所有平台共享的轮询间隔，单位为秒，最小 30 秒 |
 | `IFOLLOW_SUBSCRIBE_COUNT` | 否 | `20` | 每个平台每次拉取的最新内容数，范围 1-50 |
-| `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，接口受限时填写 |
+| `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，通常无需填写，详见下方说明 |
 | `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie，接口或视频下载受限时填写 |
 
 示例：
@@ -111,6 +111,19 @@ IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 
 插件依赖 `nonebot-plugin-parser` 发送视频，parser 的视频解析还需要安装 ffmpeg。订阅数据由
 `nonebot-plugin-localstore` 持久化到插件数据目录，不要把 Cookie 或订阅数据提交到代码仓库。
+
+### 关于抖音 Cookie
+
+抖音作品接口要求每次请求都带 `a_bogus` 签名、`ttwid` Cookie 与 `x-tt-argus` 请求头，插件会
+自动注册 ttwid 并在被风控时重新注册，因此 **匿名即可正常轮询，无需手工配置 Cookie**。
+
+`IFOLLOW_DOUYIN_COOKIE` 只是加强项：当接口开始校验登录态时可填写浏览器 Cookie。注意其中
+的 `ttwid` 会被插件自动注册的值覆盖，其余字段（如 `msToken`、`UIFID`、`sessionid`）会原样透传。
+
+获取方式：桌面 Chrome 登录 <https://www.douyin.com>，按 `F12` 打开开发者工具，切到 **Network**，
+过滤 `aweme/v1/web/aweme/post`，点开任意请求，右键 **Copy → Copy as cURL**，把其中
+`-H 'Cookie: ...'` 的整段值填入配置即可。`document.cookie` 拿不到 HttpOnly 的 `ttwid`/`UIFID`，
+不要用它。
 
 ## 🎉 使用
 
