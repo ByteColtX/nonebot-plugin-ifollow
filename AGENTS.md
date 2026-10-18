@@ -6,9 +6,17 @@
 
 - 项目是 Python 3.12+ 的 NoneBot 插件，使用 `uv`；源码在 `src/`，测试在 `tests/`；`models.py` 使用
   `nonebot-plugin-localstore` 持久化订阅、目标、订阅人和作品游标。
-- `plugin.py` 负责命令与启动装配；`polling.py` 负责轮询调度、失败退避和消息发送；
-  `*_platform.py` 负责作者与作品接口；`media.py` 使用 ParseHub 解析并下载媒体，
-  `douyin_media.py` / `bilibili_media.py` 传入平台 Cookie。
+- 入口与装配：`__init__.py` 只放插件元数据并调用 `app.setup()`；`app.py` 负责装配
+  （`Settings` → `SubscriptionStore` → `Poller` → 命令）与启动/关闭钩子；`settings.py` 是唯一
+  读取 nonebot 配置的地方。
+- 轮询子系统：`poller.py`（调度与退避）、`delivery.py`（投递与游标）、`failures.py`（失败分类）、
+  `status.py`（运行时状态与状态文案）。
+- 平台层：`platforms.py` 定义 `PlatformAdapter` 协议与内容模型，`adapters.py` 是注册表；
+  `douyin_platform.py` / `bilibili_platform.py` 实现协议，`pagination.py` 是唯一的分页实现，
+  `errors.py` 是统一错误模型。
+- 媒体层：`media.py` 使用 ParseHub 解析并下载媒体，`douyin_media.py` / `bilibili_media.py`
+  把 `Settings` 换算成 `MediaPolicy` 并传入平台 Cookie。
+- 命令层：`commands.py` 注册命令，`formatting.py` 出文案，`reply.py` 解析被引用消息。
 ## Dev environment tips
 所有 Python 命令使用 `uv` 或 `uvx`，不直接使用 `python`、`pip` 或 `pipx`。
 

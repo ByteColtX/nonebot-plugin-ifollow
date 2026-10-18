@@ -131,6 +131,9 @@ IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 插件使用 `parsehub` 解析并下载媒体，B 站视频固定按 720p 取流。订阅数据由
 `nonebot-plugin-localstore` 持久化到插件数据目录，不要把 Cookie 或订阅数据提交到代码仓库。
 
+> 订阅数据格式为 **v3**，不兼容旧版本。从旧版本升级时需要清空插件数据目录里的
+> `subscriptions.json` 并重新订阅。
+
 ### 关于媒体传输方式
 
 默认把下载好的媒体以本地路径（`file://`）交给协议端，插件不读字节也不编码，大视频不会拖慢
