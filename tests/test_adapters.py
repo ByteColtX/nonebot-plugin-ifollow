@@ -1,7 +1,22 @@
+from typing import Any
+
 import pytest
 
 from nonebot_plugin_ifollow import adapters
 from nonebot_plugin_ifollow.platforms import ResolvedAuthor
+
+PROTOCOL_MEMBERS = ("platform", "matches", "feeds", "resolve", "fetch")
+"""``PlatformAdapter`` 的成员；``cast()`` 注册不校验，缺成员只在运行时暴露。"""
+
+
+@pytest.mark.parametrize(
+    "adapter", adapters.ADAPTERS, ids=lambda module: module.platform
+)
+def test_adapters_implement_protocol(adapter: Any) -> None:
+    """适配器必须真正实现协议，否则命令层会抛 ``AttributeError``。"""
+
+    missing = [name for name in PROTOCOL_MEMBERS if not hasattr(adapter, name)]
+    assert not missing, f"{adapter.__name__} 缺 {missing}"
 
 
 def test_adapter_for_known_platforms() -> None:

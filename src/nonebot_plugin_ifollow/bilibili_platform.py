@@ -136,6 +136,11 @@ async def resolve_author(settings: Settings, value: str) -> ResolvedAuthor:
     return ResolvedAuthor(latest.author if latest else author, feeds)
 
 
+# PlatformAdapter 协议里的名字是 resolve；commands.py 调的就是 adapter.resolve()。
+# 函数本身保留 resolve_author（测试和内部调用都在用这个名字）。
+resolve = resolve_author
+
+
 async def _author_id_from_video(settings: Settings, value: str) -> str:
     """从 BV/AV 链接或短链解析出作者 UID。"""
 

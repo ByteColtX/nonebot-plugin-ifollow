@@ -92,6 +92,11 @@ async def resolve_author(settings: Settings, value: str) -> ResolvedAuthor:
     return ResolvedAuthor(author, {"video": works})
 
 
+# PlatformAdapter 协议里的名字是 resolve；commands.py 调的就是 adapter.resolve()。
+# 函数本身保留 resolve_author（测试和内部调用都在用这个名字）。
+resolve = resolve_author
+
+
 async def resolve_sec_user_id(settings: Settings, value: str) -> str:
     """解析作者主页或作品链接，支持抖音短链。"""
 
