@@ -395,6 +395,65 @@ async def test_unsubscribe_superuser_cancels_legacy_entry(env: Any) -> None:
     assert await store.snapshot() == {}
 
 
+def test_quoted_author_parses_notice() -> None:
+    """引用通知时能从首行认出平台和作者。"""
+
+    reply = Mock()
+    reply.extract_plain_text.return_value = (
+        "抖音 · 01年的小女孩 发布了新作品\n"
+        "────────────\n"
+        "#泳装搭配指南👙\n"
+        "\n"
+        "00:06 · 720×1280 · 2.5 MB\n"
+        "2026-10-19 01:39"
+    )
+
+    assert commands.quoted_author(reply) == ("抖音", "01年的小女孩")
+
+
+def test_quoted_author_returns_none_for_other_text() -> None:
+    """引用的不是爱播通知时认不出来。"""
+
+    reply = Mock()
+    reply.extract_plain_text.return_value = "随便聊两句\n没有通知"
+
+    assert commands.quoted_author(reply) is None
+    assert commands.quoted_author(None) is None
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_from_quoted_notice(env: Any) -> None:
+    """引用通知、不带参数也能取消订阅。"""
+
+    store, _ = env
+    await seed_subscription(store)  # 订阅人是 42
+    event = make_event(user_id="42")
+    event.reply = Mock()
+    event.reply.extract_plain_text.return_value = "抖音 · 作者 发布了新作品\n────"
+
+    await commands.unsubscribe(event, Mock(), args(""))
+
+    assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_from_quoted_notice_unknown_author(env: Any) -> None:
+    """引用的通知里那个作者没订阅时给出提示。"""
+
+    store, _ = env
+    await seed_subscription(store)
+    event = make_event(user_id="42")
+    event.reply = Mock()
+    event.reply.extract_plain_text.return_value = "抖音 · 别人 发布了新作品\n────"
+
+    with pytest.raises(FinishedException):
+        await commands.unsubscribe(event, Mock(), args(""))
+
+    assert "没找到「别人」的订阅" in FakeUniMessage.sent[0]
+    assert len(await store.snapshot()) == 1
+
+
 def test_target_subscriptions_group_by_platform() -> None:
     """列表按平台分组；组内保持订阅先后。"""
 
@@ -694,7 +753,10 @@ async def test_unsubscribe_requires_a_value(env: Any) -> None:
     with pytest.raises(FinishedException):
         await commands.unsubscribe(make_event(), Mock(), args(""))
 
-    assert FakeUniMessage.sent == ["用法：爱播取消订阅 <序号、作者 ID、昵称或链接>"]
+    assert FakeUniMessage.sent == [
+        "用法：爱播取消订阅 <序号、作者 ID、昵称或链接>\n"
+        "也可以引用一条爱播通知后直接发 爱播取消订阅。"
+    ]
 
 
 @pytest.mark.asyncio

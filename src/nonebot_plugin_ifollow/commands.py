@@ -13,6 +13,7 @@ from .adapters import detect
 from .app import Runtime, runtime
 from .models import AuthorSubscription, Cursor, make_target_key
 from .platforms import FeedKind, Platform, PlatformWork
+from .status import platform_name
 
 HELP = on_command("爱播帮助", aliases={"帮助爱播"}, priority=5, block=True)
 SUBSCRIBE = on_command("爱播订阅", aliases={"订阅爱播"}, priority=5, block=True)
@@ -134,9 +135,43 @@ def can_manage(event: Event) -> bool:
     return getattr(sender, "role", None) in ("owner", "admin")
 
 
+_NOTICE_SUFFIX = " 发布了新作品"
+
+
+def quoted_author(reply: Message | None) -> tuple[str, str] | None:
+    """从引用的爱播通知里认出作者。
+
+    通知首行形如 ``抖音 · 作者 发布了新作品``；逐行找这个后缀，所以正文里
+    出现同样的字样也不会认错。
+
+    Args:
+        reply: 被引用的消息。
+
+    Returns:
+        ``(平台名, 作者名)``；平台名可能是空串（通知没带平台）。认不出时返回
+        ``None``。
+    """
+
+    if reply is None:
+        return None
+    for line in reply.extract_plain_text().splitlines():
+        line = line.strip()
+        if not line.endswith(_NOTICE_SUFFIX):
+            continue
+        head = line[: -len(_NOTICE_SUFFIX)].strip()
+        platform_label, sep, name = head.partition(" · ")
+        if sep and name:
+            return platform_label, name
+        if head:
+            return "", head
+    return None
+
+
 @UNSUBSCRIBE.handle()
 async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> None:
     """取消当前会话的订阅。
+
+    不带参数时按引用的爱播通知认作者。
 
     权限：订阅人本人、群主 / 群管理员、机器人超级用户。
     管理员取消会直接删掉整条订阅（不管里面有几个订阅人）。
@@ -144,8 +179,12 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
 
     context = runtime()
     value = args.extract_plain_text().strip()
-    if not value:
-        await UniMessage("用法：爱播取消订阅 <序号、作者 ID、昵称或链接>").finish()
+    quoted = quoted_author(getattr(event, "reply", None)) if not value else None
+    if not value and quoted is None:
+        await UniMessage(
+            "用法：爱播取消订阅 <序号、作者 ID、昵称或链接>\n"
+            "也可以引用一条爱播通知后直接发 爱播取消订阅。"
+        ).finish()
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
     authors = await context.store.snapshot()
@@ -154,7 +193,25 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         await UniMessage(
             "当前会话没有爱播订阅。\n发送 爱播订阅 <作者主页链接> 开始订阅。"
         ).finish()
-    platform, author_id, author_name = await _resolve_target(context, items, value)
+    if quoted is not None:
+        platform_label, name = quoted
+        matched = [
+            author
+            for author in items
+            if author.author_name == name
+            and (not platform_label or platform_name(author.platform) == platform_label)
+        ]
+        if len(matched) != 1:
+            await UniMessage(
+                f"引用的通知里没找到「{name}」的订阅，请直接发 爱播取消订阅 <序号>。"
+            ).finish()
+        platform, author_id, author_name = (
+            matched[0].platform,
+            matched[0].author_id,
+            matched[0].author_name,
+        )
+    else:
+        platform, author_id, author_name = await _resolve_target(context, items, value)
     label = formatting.author_label(platform, author_name)
     force = can_manage(event)
     async with context.store.transaction():
