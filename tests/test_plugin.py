@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -223,3 +224,38 @@ def test_backoff_is_capped() -> None:
         for attempt in range(1, 7)
     ]
     assert delays == [30, 60, 120, 240, 300, 300]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "factory_name", "url"),
+    [
+        ("bilibili", "bilibili_media_messages", "https://t.bilibili.com/1"),
+        ("douyin", "douyin_media_messages", "https://www.douyin.com/video/1"),
+    ],
+)
+async def test_send_work_dispatches_to_platform_media(
+    platform: str,
+    factory_name: str,
+    url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, Target]] = []
+
+    class FakeMessage:
+        def __init__(self, message_url: str) -> None:
+            self.message_url = message_url
+
+        async def send(self, target: Target) -> None:
+            calls.append((self.message_url, target))
+
+    @asynccontextmanager
+    async def fake_media(media_url: str):
+        yield [FakeMessage(media_url)]
+
+    monkeypatch.setattr(plugin, factory_name, fake_media)
+    target = Target.group("group")
+
+    await plugin._send_work(url, platform, target)
+
+    assert calls == [(url, target)]

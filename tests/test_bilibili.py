@@ -213,7 +213,7 @@ async def test_dynamic_mapping_and_bvid(monkeypatch: pytest.MonkeyPatch) -> None
     assert works[0].bvid == "BV1AbcdefG12"
     assert works[0].kind == "video"
     assert works[1].kind == "dynamic"
-    assert works[1].url.endswith("dynamic-2")
+    assert works[1].url == "https://t.bilibili.com/dynamic-2"
 
 
 @pytest.mark.asyncio

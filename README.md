@@ -15,9 +15,8 @@
 
 ## 📖 介绍
 
-订阅抖音和 B 站作者的新作品及动态，并将作品分享链接交给解析库下载和发送：抖音用
-[parsehub](https://github.com/z-mio/ParseHub)，B 站用
-[nonebot-plugin-parser](https://github.com/fllesser/nonebot-plugin-parser)。
+订阅抖音和 B 站作者的新作品及动态，并将作品分享链接交给
+[parsehub](https://github.com/z-mio/ParseHub) 解析、下载和发送。
 支持抖音作者主页链接、作者主页短链、`sec_user_id`，以及 B 站作者主页和作品链接，
 每个会话独立记录已发送作品。
 
@@ -98,9 +97,9 @@
 | :--- | :---: | :---: | :--- |
 | `IFOLLOW_SUBSCRIBE_INTERVAL` | 否 | `300` | 所有平台共享的轮询间隔，单位为秒，最小 30 秒 |
 | `IFOLLOW_SUBSCRIBE_COUNT` | 否 | `20` | 每个平台每次拉取的最新内容数，范围 1-50 |
-| `IFOLLOW_MEDIA_MAX_MB` | 否 | `90` | 抖音单个媒体文件的体积上限，超出则跳过该媒体 |
+| `IFOLLOW_MEDIA_MAX_MB` | 否 | `90` | 单个媒体文件的体积上限（抖音、B 站），超出则跳过该媒体 |
 | `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，通常无需填写，详见下方说明 |
-| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie，接口或视频下载受限时填写 |
+| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie，动态解析和接口受限时填写；视频固定 720p |
 
 示例：
 
@@ -112,7 +111,7 @@ IFOLLOW_DOUYIN_COOKIE="你的抖音网页 Cookie"
 IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 ```
 
-插件依赖 `nonebot-plugin-parser` 发送视频，parser 的视频解析还需要安装 ffmpeg。订阅数据由
+插件使用 `parsehub` 解析并下载媒体，B 站视频固定按 720p 取流。订阅数据由
 `nonebot-plugin-localstore` 持久化到插件数据目录，不要把 Cookie 或订阅数据提交到代码仓库。
 
 ### 关于抖音 Cookie
@@ -127,6 +126,15 @@ IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 过滤 `aweme/v1/web/aweme/post`，点开任意请求，右键 **Copy → Copy as cURL**，把其中
 `-H 'Cookie: ...'` 的整段值填入配置即可。`document.cookie` 拿不到 HttpOnly 的 `ttwid`/`UIFID`，
 不要用它。
+
+### 关于 B 站 Cookie 与画质
+
+B 站发送由 parsehub 完成，视频接口固定按 720p（`qn=64`）取流，配置 Cookie 不会提升画质。
+`IFOLLOW_BILIBILI_COOKIE` 主要用于动态解析和接口受限时的兜底：动态在匿名态容易触发 `-352` 风控。
+在浏览器登录 B 站，按 `F12` → **Application → Cookies → https://www.bilibili.com** 复制
+`SESSDATA` 即可。Cookie 等同于账号控制权，建议使用小号，不要提交到代码仓库。
+
+动态链接会以 `t.bilibili.com/{id}` 的形式发送，parsehub 只识别这种动态链接。
 
 ## 🎉 使用
 
@@ -158,7 +166,7 @@ IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 ```
 
 首次订阅只记录当前最新作品或动态，不会补发历史内容。之后轮询发现新内容时，插件会将作品链接交给
-`nonebot-plugin-parser` 下载并发送到订阅会话。
+`parsehub` 解析、下载并发送到订阅会话。
 
 ### 管理订阅
 

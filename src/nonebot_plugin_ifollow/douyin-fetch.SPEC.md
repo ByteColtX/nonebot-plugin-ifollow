@@ -15,7 +15,7 @@ title: 抖音作品获取契约
 
 - 输入：作者主页链接、作品分享链接、`sec_user_id`，或轮询时的 `sec_user_id`。
 - 输出：`PlatformWork` 列表（按 `create_time` 降序，最新在前），或 `DouyinRequestError`。
-- 不负责翻页、历史回填与视频下载；下载交给 `nonebot-plugin-parser`。
+- 不负责翻页、历史回填与视频下载；下载交给 `media.py` 的共享管线（parsehub）。
 
 ## 接口契约
 
@@ -46,12 +46,14 @@ title: 抖音作品获取契约
 
 抖音作品的下载与发送由 `douyin_media.py` 完成，依赖 `parsehub`（`https://github.com/z-mio/ParseHub`）：
 解析作品链接 → 下载媒体到临时目录 → 拼成「文案 + 媒体」的 `UniMessage` 序列发给目标会话。
+解析、下载、图片分批与体积限制都在 `media.py`，`douyin_media.py` 只传入抖音 Cookie。
+B 站发送见 `bilibili-send.SPEC.md`。
 
-- **为什么不用 nonebot-plugin-parser**：部署主机上只有 parsehub，且 parsehub 已支持抖音详情与下载；
-  parser 的渲染卡片并非订阅推送必需，去掉它可少一层依赖。B 站发送仍走 parser，待那边迁移后一并移除。
+- **为什么不用 nonebot-plugin-parser**：部署主机上只有 parsehub，且 parsehub 已支持抖音与 B 站的
+  详情和下载；parser 的渲染卡片并非订阅推送必需，去掉它可少一层依赖。B 站迁移完成后该依赖已移除。
 - **不渲染卡片**：推送只要文本 + 媒体，图集按每批 9 张合并，单作品最多 20 个媒体，
   超过 `IFOLLOW_MEDIA_MAX_MB` 的媒体直接跳过。
-- **临时目录在上下文退出时删除**，所以必须在 `douyin_media_messages` 上下文内把消息发完。
+- **临时目录在上下文退出时删除**，所以必须在 `media_messages_for` 上下文内把消息发完。
 - **代价**：`parsehub` 要求 Python >= 3.12，本项目的最低版本随之抬高；
   且不再单独发送抖音音乐轨（旧 parser 会额外发一条音频）。
 

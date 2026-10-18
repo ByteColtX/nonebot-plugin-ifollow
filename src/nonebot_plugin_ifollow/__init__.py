@@ -3,7 +3,6 @@
 from nonebot import require
 from nonebot.plugin import PluginMetadata
 
-require("nonebot_plugin_parser")
 require("nonebot_plugin_apscheduler")
 
 from .config import Config
