@@ -38,6 +38,7 @@ from .douyin_platform import (
 from .douyin_platform import (
     fetch_author_profile as fetch_douyin_profile,
 )
+from .media import SEPARATOR
 from .models import (
     AuthorSubscription,
     Platform,
@@ -393,7 +394,7 @@ async def _deliver_new_works(
             )
             continue
         try:
-            await _send_work(work.url, work.platform, target)
+            await _send_work(work, target, target_state.subscriber_ids)
         except Exception:
             attempt = send_retry_attempts.get(retry_key, 0) + 1
             send_retry_attempts[retry_key] = attempt
@@ -412,7 +413,6 @@ async def _deliver_new_works(
         send_retry_until.pop(retry_key, None)
         if work.bvid:
             sent_bvids.add(work.bvid)
-        await _notify_subscribers(target, target_state.subscriber_ids)
         await store.update_cursor(
             author.platform, author.author_id, target_key, feed, work.work_id
         )
@@ -490,28 +490,27 @@ def _cursor_for_all_targets(author: AuthorSubscription, feed: str) -> str | None
     return cursors[0] if cursors else None
 
 
-async def _send_work(url: str, platform: str, target: Target) -> None:
-    """解析并发送一个作品；抖音和 B 站都走 parsehub。"""
+async def _send_work(
+    work: PlatformWork, target: Target, subscriber_ids: list[str]
+) -> None:
+    """解析并发送一个作品；抖音和 B 站都走 parsehub。
 
-    factory = douyin_media_messages if platform == "douyin" else bilibili_media_messages
-    async with factory(url) as messages:
+    订阅人提醒合并到文案末尾，避免每个作品多发一条消息。
+    """
+
+    factory = (
+        douyin_media_messages if work.platform == "douyin" else bilibili_media_messages
+    )
+    async with factory(work) as messages:
+        if messages and subscriber_ids:
+            footer = UniMessage(f"\n{SEPARATOR}\n")
+            for index, subscriber_id in enumerate(subscriber_ids):
+                if index:
+                    footer += " "
+                footer += UniMessage.at(subscriber_id)
+            messages[0] += footer
         for message in messages:
             await message.send(target=target)
-
-
-async def _notify_subscribers(target: Target, subscriber_ids: list[str]) -> None:
-    """提醒订阅人有新内容。"""
-
-    if not subscriber_ids:
-        return
-    message = UniMessage()
-    for subscriber_id in subscriber_ids:
-        message += UniMessage.at(subscriber_id)
-    message += " 你订阅的爱播有新内容了"
-    try:
-        await message.send(target=target)
-    except Exception:
-        logger.opt(exception=True).warning("爱播订阅人提醒发送失败")
 
 
 def _record_author_failure(

@@ -5,6 +5,9 @@ from typing import Any
 import pytest
 
 from nonebot_plugin_ifollow import bilibili_media, media
+from nonebot_plugin_ifollow.platforms import AuthorInfo, PlatformWork
+
+CREATE_TIME = 1791073726
 
 
 def write(path: Path, suffix: str = ".png") -> Path:
@@ -13,8 +16,26 @@ def write(path: Path, suffix: str = ".png") -> Path:
     return target
 
 
+def make_work(url: str, *, kind: str = "video") -> PlatformWork:
+    return PlatformWork(
+        platform="bilibili",
+        work_id="1",
+        url=url,
+        title="",
+        description="",
+        create_time=CREATE_TIME,
+        author=AuthorInfo("123", "原神"),
+        kind="video" if kind == "video" else "dynamic",
+    )
+
+
 def make_result(
-    *, suffix: str, title: str, content: str, created: dict[str, Any] | None = None
+    *,
+    suffix: str,
+    title: str,
+    content: str,
+    created: dict[str, Any] | None = None,
+    duration: int = 0,
 ) -> Any:
     class FakeResult:
         def __init__(self) -> None:
@@ -25,7 +46,16 @@ def make_result(
             if created is not None:
                 created["dir"] = Path(path)
             media_file = write(Path(path) / "work", suffix=suffix)
-            return SimpleNamespace(media=[SimpleNamespace(path=media_file)])
+            return SimpleNamespace(
+                media=[
+                    SimpleNamespace(
+                        path=media_file,
+                        duration=duration,
+                        width=2560,
+                        height=1440,
+                    )
+                ]
+            )
 
     return FakeResult()
 
@@ -40,16 +70,23 @@ async def test_bilibili_media_messages_sends_video(
         created["url"] = url
         created["cookie"] = cookie
         return make_result(
-            suffix=".mp4", title="视频标题", content="视频简介", created=created
+            suffix=".mp4",
+            title="视频标题",
+            content="视频简介",
+            created=created,
+            duration=450,
         )
 
     monkeypatch.setattr(media, "parse_work", fake_parse)
     monkeypatch.setattr(bilibili_media.config, "ifollow_bilibili_cookie", "SESSDATA=x")
 
     url = "https://www.bilibili.com/video/BV1AbcdefG12"
-    async with bilibili_media.bilibili_media_messages(url) as messages:
+    async with bilibili_media.bilibili_media_messages(make_work(url)) as messages:
         assert created["dir"].is_dir()
-        assert messages[0].extract_plain_text() == f"视频标题\n视频简介\n{url}"
+        caption = messages[0].extract_plain_text()
+        assert caption.startswith(
+            f"原神 发布了新作品\n{media.SEPARATOR}\n视频标题\n视频简介\n\n07:30"
+        )
         assert [segment.type for segment in messages[1]] == ["video"]
 
     assert not created["dir"].exists()
@@ -72,8 +109,11 @@ async def test_bilibili_media_messages_sends_dynamic_images(
     monkeypatch.setattr(bilibili_media.config, "ifollow_bilibili_cookie", None)
 
     url = "https://t.bilibili.com/1255716547539763206"
-    async with bilibili_media.bilibili_media_messages(url) as messages:
-        assert messages[0].extract_plain_text() == f"动态正文\n{url}"
+    async with bilibili_media.bilibili_media_messages(
+        make_work(url, kind="dynamic")
+    ) as messages:
+        caption = messages[0].extract_plain_text()
+        assert caption.startswith(f"原神 发布了新作品\n{media.SEPARATOR}\n动态正文")
         assert [segment.type for segment in messages[1]] == ["image"]
 
     assert created["url"] == url
