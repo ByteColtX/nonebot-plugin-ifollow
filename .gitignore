@@ -32,3 +32,6 @@ junit.xml
 
 # Local plugin data
 cache/
+
+# macOS
+.DS_Store
