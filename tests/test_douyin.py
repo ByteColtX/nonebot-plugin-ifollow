@@ -270,6 +270,38 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
 
 
 @pytest.mark.asyncio
+async def test_fetch_latest_works_uses_mobile_aid(client: Any) -> None:
+    """作品列表必须用 aid=1128。
+
+    6383（PC web）的作品列表会滞后好几天：实测 4 个作者里 2 个的最新作品
+    在 6383 的返回里缺失，换 1128 就都在。首次订阅的「最后更新」也因此变准。
+    """
+
+    created = client(
+        [
+            response(
+                data={
+                    "status_code": 0,
+                    "has_more": False,
+                    "max_cursor": "0",
+                    "aweme_list": [
+                        {
+                            "aweme_id": "103",
+                            "create_time": 30,
+                            "author": {"nickname": "作者"},
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+
+    await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+
+    assert created.requests[0].url.params["aid"] == "1128"
+
+
+@pytest.mark.asyncio
 async def test_fetch_latest_works_omits_count_and_stops_at_limit(
     client: Any,
 ) -> None:

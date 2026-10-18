@@ -225,7 +225,10 @@ async def _fetch_post_page(
 
     params = {
         "device_platform": "webapp",
-        "aid": "6383",
+        # 1128（移动端）的作品列表是实时的；6383（PC web）会滞后好几天 ——
+        # 实测 4 个作者里 2 个的最新作品在 6383 的列表里缺失，1128 都在。
+        # 签名方式和其余参数不变，只换客户端号。
+        "aid": "1128",
         "channel": "channel_pc_web",
         "sec_user_id": sec_user_id,
         "max_cursor": max_cursor,
