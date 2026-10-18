@@ -66,7 +66,7 @@ def tick_seconds() -> float:
         扫描间隔，单位为秒。
     """
 
-    interval = config.ifollow_subscribe_interval
+    interval = config.ifollow_sub_interval
     return min(max(interval / 4, TICK_MIN_SECONDS), TICK_MAX_SECONDS)
 
 
@@ -231,7 +231,7 @@ async def _poll_author(store: SubscriptionStore, author: AuthorSubscription) -> 
         state.failure_count = 0
         state.last_error = ""
         state.last_success_at = time.monotonic()
-        state.next_poll_at = time.monotonic() + config.ifollow_subscribe_interval
+        state.next_poll_at = time.monotonic() + config.ifollow_sub_interval
     finally:
         _in_flight.discard(author.key)
 
@@ -338,6 +338,7 @@ async def _deliver_feed(
 
     if not works:
         return
+    limit = config.ifollow_sub_max_items
     pending: dict[str, list[PlatformWork]] = {}
     for target_key, target_state in author.targets.items():
         cursor = target_state.cursors.get(feed)
@@ -345,6 +346,13 @@ async def _deliver_feed(
             await _advance(store, author, target_key, feed, works[0])
             continue
         unseen = _unseen(works, cursor)
+        if len(unseen) > limit:
+            logger.warning(
+                f"{platform_name(author.platform)}作者 {author.author_id} 的 {feed} "
+                f"积压 {len(unseen)} 条，只补发最新 {limit} 条，"
+                f"其余 {len(unseen) - limit} 条不再补发"
+            )
+            unseen = unseen[-limit:]
         if unseen:
             pending[target_key] = unseen
     if not pending:
@@ -671,7 +679,7 @@ def status_text(authors: dict[str, AuthorSubscription]) -> str:
     lines = [
         "爱播状态",
         f"调度：每 {int(tick_seconds())} 秒扫描 · "
-        f"作者周期 {config.ifollow_subscribe_interval} 秒 · "
+        f"作者周期 {config.ifollow_sub_interval} 秒 · "
         f"抓取并发 {FETCH_CONCURRENCY}",
     ]
     if _last_round_at:

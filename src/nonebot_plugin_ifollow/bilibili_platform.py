@@ -16,7 +16,6 @@ from nonebot import logger
 
 from .config import config
 from .platforms import (
-    MAX_CATCHUP_PAGES,
     AuthorInfo,
     Cursor,
     PlatformWork,
@@ -49,7 +48,6 @@ BILIBILI_APP_HEADERS = {
         "model/Pixel Build/UP1A"
     ),
 }
-APP_PAGE_SIZE = 20
 JOINT_CREATION_SUFFIX = " 等联合创作"
 
 
@@ -293,13 +291,10 @@ async def _fetch_video_works_app(
     works: list[PlatformWork] = []
     seen: set[str] = set()
     aid: int | None = None
+    limit = config.ifollow_sub_max_items
     async with _app_client() as client:
-        for _ in range(MAX_CATCHUP_PAGES if cursor else 1):
-            params = {
-                "vmid": mid,
-                "ps": str(min(config.ifollow_subscribe_count, APP_PAGE_SIZE)),
-                "order": "pubdate",
-            }
+        while True:
+            params = {"vmid": mid, "order": "pubdate"}
             if aid is not None:
                 params["aid"] = str(aid)
             data = await _app_get(client, "/x/v2/space/archive/cursor", params)
@@ -316,7 +311,9 @@ async def _fetch_video_works_app(
             works.extend(page)
             if not page or not data.get("has_next"):
                 break
-            if cursor and page_reaches_cursor(page, cursor):
+            if cursor is None or len(works) >= limit:
+                break
+            if page_reaches_cursor(page, cursor):
                 break
             last_item = items[-1] if isinstance(items[-1], dict) else {}
             last_aid = last_item.get("param")
@@ -359,11 +356,11 @@ async def _fetch_video_works_web(
     works: list[PlatformWork] = []
     oid: int | None = None
     author: AuthorInfo | None = None
-    for _ in range(MAX_CATCHUP_PAGES if cursor else 1):
+    limit = config.ifollow_sub_max_items
+    while True:
         try:
             result = await user.get_media_list(
                 oid=oid,
-                ps=config.ifollow_subscribe_count,
                 direction=False,
                 desc=True,
                 with_current=False,
@@ -385,7 +382,9 @@ async def _fetch_video_works_web(
         works.extend(page)
         if not page or not result.get("has_more"):
             break
-        if cursor and page_reaches_cursor(page, cursor):
+        if cursor is None or len(works) >= limit:
+            break
+        if page_reaches_cursor(page, cursor):
             break
         last_aid = items[-1].get("id")
         if not last_aid:
@@ -433,7 +432,8 @@ async def fetch_dynamic_works(
     user = User(int(mid), credential=_credential())
     works: list[PlatformWork] = []
     offset = ""
-    for _ in range(MAX_CATCHUP_PAGES if cursor else 1):
+    limit = config.ifollow_sub_max_items
+    while True:
         try:
             result = await user.get_dynamics_new(offset=offset)
         except Exception as exc:
@@ -447,7 +447,9 @@ async def fetch_dynamic_works(
         works.extend(page)
         if not page or not result.get("has_more"):
             break
-        if cursor and page_reaches_cursor(page, cursor):
+        if cursor is None or len(works) >= limit:
+            break
+        if page_reaches_cursor(page, cursor):
             break
         next_offset = str(result.get("offset") or "")
         if not next_offset or next_offset == offset:

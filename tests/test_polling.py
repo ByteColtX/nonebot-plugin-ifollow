@@ -438,11 +438,29 @@ async def test_abandoned_work_does_not_block_newer_ones(
 def test_tick_scales_with_author_period(monkeypatch: pytest.MonkeyPatch) -> None:
     """扫描间隔跟着作者周期伸缩，不写死成小常量。"""
 
-    monkeypatch.setattr(polling.config, "ifollow_subscribe_interval", 1800)
+    monkeypatch.setattr(polling.config, "ifollow_sub_interval", 1800)
     assert polling.tick_seconds() == polling.TICK_MAX_SECONDS
 
-    monkeypatch.setattr(polling.config, "ifollow_subscribe_interval", 300)
+    monkeypatch.setattr(polling.config, "ifollow_sub_interval", 300)
     assert polling.tick_seconds() == 75
 
-    monkeypatch.setattr(polling.config, "ifollow_subscribe_interval", 30)
+    monkeypatch.setattr(polling.config, "ifollow_sub_interval", 30)
     assert polling.tick_seconds() == polling.TICK_MIN_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_catch_up_is_capped_to_newest_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """积压超过默认上限时只补发最新 5 条，更早的跳过并推进游标。"""
+
+    store, author, (target_key,) = await make_author(tmp_path, "group")
+    sent: list[str] = []
+    prepared = patch_media(monkeypatch, sent)
+    works = [make_work(f"w{index}", 10 + index) for index in range(6)][::-1]
+
+    await polling._deliver_feed(store, author, "video", works, {target_key: set()})
+
+    assert sent == ["w1", "w2", "w3", "w4", "w5"]
+    assert prepared == sent
+    assert cursor_of(await store.snapshot(), target_key) == Cursor("w5", 15)

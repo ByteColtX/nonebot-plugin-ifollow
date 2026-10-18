@@ -13,7 +13,6 @@ from nonebot import logger
 from .config import config
 from .douyin_abogus import generate_abogus
 from .platforms import (
-    MAX_CATCHUP_PAGES,
     AuthorInfo,
     Cursor,
     PlatformWork,
@@ -148,7 +147,8 @@ async def fetch_latest_works(
 
     Args:
         sec_user_id: 作者 sec_user_id。
-        cursor: 目标当前的游标；传入时会按页补发，直到盖到游标或达到页数上限。
+        cursor: 目标当前的游标；传入时会按页补发，直到盖到游标或攒够
+            ``IFOLLOW_SUB_MAX_ITEMS`` 条。
 
     Returns:
         从新到旧排列的作品列表。
@@ -160,13 +160,14 @@ async def fetch_latest_works(
     works: list[PlatformWork] = []
     seen: set[str] = set()
     max_cursor = "0"
+    limit = config.ifollow_sub_max_items
     async with httpx.AsyncClient(
         headers=_headers(),
         follow_redirects=True,
         timeout=30,
         verify=False,
     ) as client:
-        for _ in range(MAX_CATCHUP_PAGES if cursor else 1):
+        while True:
             data = await _fetch_post_page(client, sec_user_id, max_cursor)
             raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
             if not isinstance(raw_works, list):
@@ -181,7 +182,9 @@ async def fetch_latest_works(
             works.extend(page)
             if not page or not data.get("has_more"):
                 break
-            if cursor and page_reaches_cursor(page, cursor):
+            if cursor is None or len(works) >= limit:
+                break
+            if page_reaches_cursor(page, cursor):
                 break
             next_cursor = str(data.get("max_cursor") or "")
             if not next_cursor or next_cursor == max_cursor:
@@ -204,7 +207,6 @@ async def _fetch_post_page(
         "sec_user_id": sec_user_id,
         "max_cursor": max_cursor,
         "locate_query": "false",
-        "count": str(config.ifollow_subscribe_count),
         "publish_video_strategy_type": "2",
         "pc_client_type": "1",
         "version_code": "170400",
