@@ -3,6 +3,7 @@ id: douyin-fetch
 type: module-design
 status: draft
 title: 抖音作品获取契约
+depends-on: [media]
 ---
 
 ## Responsibility
@@ -36,10 +37,14 @@ title: 抖音作品获取契约
   异常交给作者级退避。不把它们当成网络错误直接上抛，否则一次 ttwid 过期会让该作者长时间停更。
 - **ttwid 由插件自动注册**：匿名即可轮询，不要求用户配置 Cookie。配置 Cookie 中的 `ttwid` 会被
   自动注册值覆盖（否则无法自愈），其余字段原样透传。
+- **不关 TLS 校验**：签名、ttwid 与 Cookie 都经这几个连接传输，一律校验证书；曾用
+  `verify=False`，实测证书链正常后移除。
 - **签名算法内嵌而非依赖 f2**：f2 是完整 CLI 应用、依赖链重；内嵌只引入纯 Python 的 `gmssl`。
   代价是抖音改算法时需要人工同步上游 `f2/utils/abogus.py`。
-- **只取最新一页**：匿名态用 `max_cursor` 翻页恒返回空列表（加 `msToken`、`locate_item_id` 均无效），
-  而轮询只需要最新 N 条，与"首次订阅只记录当前最新作品"的不变量一致。
+- **分页不传条数**：请求不带 `count`，页大小用平台默认。首次订阅（无游标）只取第一页；
+  轮询带游标时翻到盖到游标、或攒够 `IFOLLOW_SUB_MAX_ITEMS` 条（默认 5）就停。
+  补发上限由条数决定，不再用页数上限。抖音默认页大小未确认（未确认）；页偏小时只是多翻几页，
+  上限由条数兜底。
 - **`status_code == 5` 不可重试**：表示作者不存在或已注销，重试只会浪费配额。
 
 ## 发送链路
@@ -47,8 +52,8 @@ title: 抖音作品获取契约
 抖音作品的下载与发送由 `douyin_media.py` 完成，依赖 `parsehub`（`https://github.com/z-mio/ParseHub`）：
 解析作品链接 → 下载媒体到临时目录 → 拼成「文案 + 媒体」的 `UniMessage` 序列发给目标会话。
 解析、下载、图片分批与体积限制都在 `media.py`，`douyin_media.py` 只传入抖音 Cookie。
-B 站发送见 `bilibili-send.SPEC.md`。媒体以 base64 消息段发送（协议端可能在另一台机器，
-`file://` 路径读不到），细节与代价也记在那份 spec 里。
+B 站发送见 `bilibili-send.SPEC.md`。媒体默认以本地路径（`file://`）交给协议端，只有
+`IFOLLOW_USE_BASE64=true` 时才编码成 base64；传输方式的代价也记在那份 spec 里。
 
 - **为什么不用 nonebot-plugin-parser**：部署主机上只有 parsehub，且 parsehub 已支持抖音与 B 站的
   详情和下载；parser 的渲染卡片并非订阅推送必需，去掉它可少一层依赖。B 站迁移完成后该依赖已移除。
