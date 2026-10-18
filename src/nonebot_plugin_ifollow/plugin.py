@@ -11,7 +11,12 @@ from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target, get_target
 
-from .bilibili_platform import bilibili_dynamics_enabled, warm_up_bilibili
+from .bilibili_platform import (
+    bilibili_dynamics_enabled,
+    extract_bilibili_mid,
+    warm_up_bilibili,
+)
+from .douyin_platform import extract_sec_user_id
 from .models import (
     AuthorSubscription,
     Cursor,
@@ -33,7 +38,7 @@ HELP_MESSAGE = (
     "爱播帮助：\n"
     "爱播订阅 <抖音或 B 站作者主页/作品链接>\n"
     "爱播订阅列表（别名：爱播列表）\n"
-    "爱播取消订阅 <序号或作者主页/作品链接>\n"
+    "爱播取消订阅 <序号、作者 ID、昵称或作者主页/作品链接>\n"
     "爱播状态（超级用户，查看轮询健康度）\n"
     "也可引用包含链接的消息后发送 爱播订阅。\n"
     "支持抖音和 B 站；首次订阅不会补发历史内容。"
@@ -173,14 +178,13 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
 
     value = args.extract_plain_text().strip()
     if not value:
-        await UniMessage("用法：爱播取消订阅 <序号、作者主页链接或作品链接>").finish()
+        await UniMessage("用法：爱播取消订阅 <序号、作者 ID、昵称或主页链接>").finish()
     target = get_target(event, bot)
     target_key = _target_key(target)
+    items = _target_subscriptions(await store.snapshot(), target_key)
+    if not items:
+        await UniMessage("当前会话没有爱播订阅。").finish()
     if value.isdecimal():
-        authors = await store.snapshot()
-        items = _target_subscriptions(authors, target_key)
-        if not items:
-            await UniMessage("当前会话没有爱播订阅。").finish()
         index = int(value)
         if not 1 <= index <= len(items):
             await UniMessage(f"序号无效，请输入 1 到 {len(items)}。").finish()
@@ -188,11 +192,16 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         platform = selected.platform
         author_id = selected.author_id
     else:
-        try:
-            platform, author = await resolve_author(value)
-        except Exception as exc:
-            await UniMessage(f"取消失败：{exc}").finish()
-        author_id = author.author_id
+        matched = _match_subscription(items, value)
+        if matched is not None:
+            platform = matched.platform
+            author_id = matched.author_id
+        else:
+            try:
+                platform, author = await resolve_author(value)
+            except Exception as exc:
+                await UniMessage(f"取消失败：{exc}").finish()
+            author_id = author.author_id
 
     removed, target_removed = await store.remove_subscriber(
         platform, author_id, target_key, event.get_user_id()
@@ -252,6 +261,43 @@ def _target_subscriptions(
     """返回当前会话的订阅，顺序与订阅列表命令一致。"""
 
     return [author for author in authors.values() if target_key in author.targets]
+
+
+def _match_subscription(
+    items: list[AuthorSubscription], value: str
+) -> AuthorSubscription | None:
+    """按作者 ID、handle、链接里的 ID 或唯一昵称匹配本地订阅。
+
+    命中时不需要联网，作者已注销或接口被风控也能取消订阅。
+
+    Args:
+        items: 当前会话的订阅。
+        value: 用户输入。
+
+    Returns:
+        唯一命中的订阅；没命中或昵称重名时返回 ``None``。
+    """
+
+    key = value.strip()
+    for author in items:
+        if key in (author.author_id, author.author_handle):
+            return author
+    for candidate in _local_author_ids(key):
+        for author in items:
+            if candidate in (author.author_id, author.author_handle):
+                return author
+    matched = [author for author in items if author.author_name == key]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _local_author_ids(value: str) -> list[str]:
+    """从链接中抽取作者 ID；只用正则，不发请求。"""
+
+    found: list[str] = []
+    for extractor in (extract_sec_user_id, extract_bilibili_mid):
+        if author_id := extractor(value):
+            found.append(author_id)
+    return found
 
 
 def _format_handle(author: AuthorSubscription) -> str:
