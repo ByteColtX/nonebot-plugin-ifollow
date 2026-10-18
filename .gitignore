@@ -25,10 +25,12 @@ junit.xml
 
 # Tool caches
 .ruff_cache/
+.playwright-cli/
 .mypy_cache/
 .pyright/
 .hypothesis/
 *.log
+logs/
 
 # Local plugin data
 cache/
