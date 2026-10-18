@@ -13,7 +13,6 @@ from .adapters import detect
 from .app import Runtime, runtime
 from .models import AuthorSubscription, Cursor, make_target_key
 from .platforms import FeedKind, Platform, PlatformWork
-from .status import platform_name
 
 HELP = on_command("爱播帮助", aliases={"帮助爱播"}, priority=5, block=True)
 SUBSCRIBE = on_command("爱播订阅", aliases={"订阅爱播"}, priority=5, block=True)
@@ -40,16 +39,26 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     context = runtime()
     value = args.extract_plain_text().strip() or await reply.replied_text(event, bot)
     if not value:
-        await UniMessage("用法：爱播订阅 <抖音或 B 站作者主页链接、作品链接>").finish()
+        await UniMessage(
+            "用法：爱播订阅 <作者主页或作品链接>，也可引用含链接的消息后发送。"
+        ).finish()
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
     subscriber_id = event.get_user_id()
     try:
         adapter = detect(value)
+    except ValueError as exc:
+        report = formatting.describe_failure(exc)
+        logger.warning(f"爱播订阅解析失败 code={report.code} value={value!r}")
+        await UniMessage(formatting.render_failure("订阅", report)).finish()
+    try:
         resolved = await adapter.resolve(context.settings, value)
     except Exception as exc:
-        logger.opt(exception=True).warning("爱播订阅解析失败")
-        await UniMessage(f"订阅失败：{exc}").finish()
+        report = formatting.describe_failure(exc, platform=adapter.platform)
+        logger.opt(exception=True).warning(
+            f"爱播订阅解析失败 code={report.code} value={value!r}"
+        )
+        await UniMessage(formatting.render_failure("订阅", report)).finish()
 
     author = resolved.author
     authors = await context.store.snapshot()
@@ -60,16 +69,15 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
             joined = await context.store.add_subscriber(
                 adapter.platform, author.author_id, target_key, subscriber_id
             )
+        label = formatting.author_label(adapter.platform, existing.author_name)
         if joined:
-            await UniMessage(
-                f"已加入{platform_name(adapter.platform)}作者 "
-                f"{existing.author_name} 的更新提醒。"
-            ).send(target=target, bot=bot)
+            await UniMessage(f"已为 {label} 开启更新提醒。").send(
+                target=target, bot=bot
+            )
             return
-        await UniMessage(
-            f"当前会话已订阅{platform_name(adapter.platform)}作者 "
-            f"{existing.author_name}，无需重复订阅。"
-        ).send(target=target, bot=bot)
+        await UniMessage(f"本会话已订阅 {label}，无需重复。").send(
+            target=target, bot=bot
+        )
         return
 
     cursors = {
@@ -94,14 +102,16 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
             added = await context.store.add_subscriber(
                 adapter.platform, author.author_id, target_key, subscriber_id
             )
+    label = formatting.author_label(adapter.platform, author.name)
     if not added:
-        await UniMessage("当前会话已订阅该作者，无需重复订阅。").send(
+        await UniMessage(f"本会话已订阅 {label}，无需重复。").send(
             target=target, bot=bot
         )
         return
     await UniMessage(
-        f"已订阅{platform_name(adapter.platform)}作者 {author.name}。\n"
-        "首次订阅不会补发历史内容，有新作品或动态时会自动发送。"
+        f"已订阅 {label}\n"
+        "首次订阅不补发历史内容，有新作品会自动发送。\n"
+        "发送 爱播订阅列表 查看当前订阅。"
     ).send(target=target, bot=bot)
 
 
@@ -112,26 +122,31 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
     context = runtime()
     value = args.extract_plain_text().strip()
     if not value:
-        await UniMessage("用法：爱播取消订阅 <序号、作者 ID、昵称或主页链接>").finish()
+        await UniMessage("用法：爱播取消订阅 <序号、作者 ID、昵称或链接>").finish()
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
     authors = await context.store.snapshot()
     items = formatting.target_subscriptions(authors, target_key)
     if not items:
-        await UniMessage("当前会话没有爱播订阅。").finish()
-    platform, author_id = await _resolve_target(context, items, value)
+        await UniMessage(
+            "当前会话没有爱播订阅。\n发送 爱播订阅 <作者主页链接> 开始订阅。"
+        ).finish()
+    platform, author_id, author_name = await _resolve_target(context, items, value)
+    label = formatting.author_label(platform, author_name)
     async with context.store.transaction():
         removed, target_removed = await context.store.remove_subscriber(
             platform, author_id, target_key, event.get_user_id()
         )
     if removed and target_removed:
-        await UniMessage("已取消订阅。").send(target=target, bot=bot)
+        await UniMessage(f"已取消 {label} 的订阅。").send(target=target, bot=bot)
     elif removed:
-        await UniMessage("已取消你的更新提醒，其他订阅人仍会收到通知。").send(
+        await UniMessage(f"已取消你在 {label} 的提醒，其他订阅人仍会收到通知。").send(
             target=target, bot=bot
         )
     else:
-        await UniMessage("当前会话没有你的这个订阅。").send(target=target, bot=bot)
+        await UniMessage(
+            "本会话没有你的这个订阅。发送 爱播订阅列表 可查看当前订阅。"
+        ).send(target=target, bot=bot)
 
 
 @LIST.handle()
@@ -160,24 +175,36 @@ async def status_command(event: Event, bot: Bot) -> None:
 
 async def _resolve_target(
     context: Runtime, items: list[AuthorSubscription], value: str
-) -> tuple[Platform, str]:
-    """把用户输入解析成（平台, 作者 ID）：先本地匹配，再联网。"""
+) -> tuple[Platform, str, str]:
+    """把用户输入解析成（平台, 作者 ID, 昵称）：先本地匹配，再联网。"""
 
     if value.isdecimal():
         index = int(value)
         if not 1 <= index <= len(items):
-            await UniMessage(f"序号无效，请输入 1 到 {len(items)}。").finish()
+            await UniMessage(
+                f"序号无效：当前共 {len(items)} 个订阅，请输入 1-{len(items)}。"
+            ).finish()
         selected = items[index - 1]
-        return selected.platform, selected.author_id
+        return selected.platform, selected.author_id, selected.author_name
     matched = match_subscription(items, value)
     if matched is not None:
-        return matched.platform, matched.author_id
+        return matched.platform, matched.author_id, matched.author_name
     try:
         adapter = detect(value)
+    except ValueError as exc:
+        report = formatting.describe_failure(exc)
+        logger.warning(f"爱播取消失败 code={report.code} value={value!r}")
+        await UniMessage(formatting.render_failure("取消", report)).finish()
+    try:
         resolved = await adapter.resolve(context.settings, value)
     except Exception as exc:
-        await UniMessage(f"取消失败：{exc}").finish()
-    return adapter.platform, resolved.author.author_id
+        report = formatting.describe_failure(exc, platform=adapter.platform)
+        logger.opt(exception=True).warning(
+            f"爱播取消失败 code={report.code} value={value!r}"
+        )
+        await UniMessage(formatting.render_failure("取消", report)).finish()
+    author = resolved.author
+    return adapter.platform, author.author_id, author.name
 
 
 def match_subscription(

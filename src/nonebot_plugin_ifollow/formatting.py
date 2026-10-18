@@ -3,22 +3,98 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
+import httpx
+
+from .errors import PermanentError, TransientError
 from .media import SEPARATOR
 from .models import AuthorSubscription
 from .platforms import Platform
 from .status import platform_name
 
 HELP_MESSAGE = (
-    "爱播帮助：\n"
-    "爱播订阅 <抖音或 B 站作者主页/作品链接>\n"
-    "爱播订阅列表（别名：爱播列表）\n"
-    "爱播取消订阅 <序号、作者 ID、昵称或作者主页/作品链接>\n"
-    "爱播状态（超级用户，查看轮询健康度）\n"
-    "也可引用包含链接的消息后发送 爱播订阅。\n"
-    "支持抖音和 B 站；首次订阅不会补发历史内容。"
+    "爱播帮助\n"
+    f"{SEPARATOR}\n"
+    "· 爱播订阅 <作者主页或作品链接>\n"
+    "· 爱播订阅列表\n"
+    "· 爱播取消订阅 <序号、作者 ID 或链接>\n"
+    "· 爱播状态（仅超级用户）\n"
+    f"{SEPARATOR}\n"
+    "引用含链接的消息后发送 爱播订阅 也能订阅。\n"
+    "支持抖音与 B 站，首次订阅不补发历史内容。"
 )
+
+_PLATFORM_CODES = {"douyin": "DY", "bilibili": "BILI"}
+
+_RISK_HINTS = ("风控", "拦截", "blocked", "403", "412", "429", "-352", "-799", "-509")
+_GONE_HINTS = ("不存在", "已注销", "已删除", "404", "410", "62002")
+
+
+@dataclass(frozen=True, slots=True)
+class FailureReport:
+    """面向用户的失败说明，附带可供运维检索的错误码。"""
+
+    code: str
+    reason: str
+    hint: str
+
+
+def author_label(platform: str, name: str) -> str:
+    """统一的作者称呼：``平台 · 昵称``。"""
+
+    return f"{platform_name(platform)} · {name}"
+
+
+def describe_failure(
+    exc: BaseException, *, platform: str | None = None
+) -> FailureReport:
+    """把异常翻译成「人话 + 建议 + 错误码」，细节只留在日志里。"""
+
+    code = _PLATFORM_CODES.get(platform or "", "")
+    text = str(exc).lower()
+    if isinstance(exc, ValueError):
+        return FailureReport(
+            _code(code, "INPUT"),
+            "没能识别这个链接",
+            "请发送作者主页链接、作品链接，或直接发作者 ID。",
+        )
+    if isinstance(exc, PermanentError) or any(k in text for k in _GONE_HINTS):
+        return FailureReport(
+            _code(code, "GONE"),
+            "作者不存在或已注销",
+            "请确认链接是否指向仍在更新的作者。",
+        )
+    if any(k in text for k in _RISK_HINTS):
+        return FailureReport(
+            _code(code, "RISK"),
+            "平台暂时拦截了请求",
+            "请稍后重试；多次失败可以在 .env 里配置对应平台的 Cookie。",
+        )
+    if isinstance(exc, (TransientError, httpx.HTTPError)):
+        return FailureReport(
+            _code(code, "NET"),
+            "暂时连不上平台",
+            "请稍后重试。",
+        )
+    return FailureReport(
+        _code(code, "UNKNOWN"),
+        "遇到未预期的问题",
+        "请稍后重试；如果一直失败，请把下面的错误码发出来。",
+    )
+
+
+def _code(platform_code: str, category: str) -> str:
+    parts = [part for part in (platform_code, category) if part]
+    return "E-" + "-".join(parts)
+
+
+def render_failure(action: str, report: FailureReport) -> str:
+    """生成 ``订阅失败：…`` 这类消息；只有人话、建议与错误码，没有堆栈。"""
+
+    return f"{action}失败：{report.reason}\n{report.hint}\n错误码 {report.code}"
+
 
 PLATFORM_ORDER: tuple[Platform, ...] = ("douyin", "bilibili")
 """订阅列表里平台的展示顺序，同时决定序号顺序。"""
@@ -111,8 +187,12 @@ def _describe(author: AuthorSubscription, *, now: float | None) -> str:
 __all__ = [
     "HELP_MESSAGE",
     "PLATFORM_ORDER",
+    "FailureReport",
+    "author_label",
+    "describe_failure",
     "format_handle",
     "format_relative_time",
+    "render_failure",
     "subscription_list",
     "target_subscriptions",
 ]
