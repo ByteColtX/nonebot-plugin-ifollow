@@ -488,7 +488,7 @@ def test_permanent_work_error_covers_parsehub_names() -> None:
 def test_delivery_context_prune_clears_sent_buffers(tmp_path: Path) -> None:
     store = SubscriptionStore(tmp_path)
     poller = Poller(store, SETTINGS)
-    delivery.sent_identities(poller.context, "gone").append("x")
+    delivery.sent_identities(poller.context, "bilibili:1", "gone").append("x")
 
     delivery.prune(poller.context, {})
 
@@ -619,3 +619,68 @@ async def test_work_older_than_cursor_is_not_sent(
 
     assert sent == []
     assert cursor_of(await store.snapshot(), target_key) == Cursor("gone", 2)
+
+
+@pytest.mark.asyncio
+async def test_sent_memory_is_scoped_per_author(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不同作者的作品标识可能相同，去重不能跨作者生效。
+
+    `PlatformWork.identity` 只在平台内唯一：抖音 aweme_id 与 B 站动态 id 都是
+    19 位数字，一旦相等，按目标会话共享的去重缓冲会把后一个作者的作品当成「已发」，
+    推进游标却什么都不发。
+    """
+
+    store = SubscriptionStore(tmp_path)
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    await store.add_target(
+        "douyin",
+        "d1",
+        "抖音作者",
+        target_key,
+        target.dump(),
+        {"video": Cursor("old", 1)},
+    )
+    await store.add_target(
+        "bilibili",
+        "b1",
+        "B站作者",
+        target_key,
+        target.dump(),
+        {"dynamic": Cursor("old", 1)},
+    )
+    douyin_author = AuthorSubscription(
+        "douyin",
+        "d1",
+        "抖音作者",
+        {target_key: TargetSubscription(target.dump(), {"video": Cursor("old", 1)})},
+    )
+    bili_author = AuthorSubscription(
+        "bilibili",
+        "b1",
+        "B站作者",
+        {target_key: TargetSubscription(target.dump(), {"dynamic": Cursor("old", 1)})},
+    )
+    douyin_work = PlatformWork(
+        platform="douyin",
+        work_id="7695069095121681125",
+        url="https://www.douyin.com/video/7695069095121681125",
+        title="抖音作品",
+        description="",
+        create_time=10,
+        author=AuthorInfo("d1", "抖音作者", "d1"),
+    )
+    bili_work = make_work("7695069095121681125", 20, kind="dynamic")
+    sent: list[str] = []
+    patch_media(monkeypatch, sent)
+    poller = Poller(store, SETTINGS)
+
+    await delivery.deliver_feed(poller.context, douyin_author, "video", [douyin_work])
+    await delivery.deliver_feed(poller.context, bili_author, "dynamic", [bili_work])
+
+    assert sent == ["7695069095121681125", "7695069095121681125"]
+    snapshot = await store.snapshot()
+    cursors = snapshot["bilibili:b1"].targets[target_key].cursors
+    assert cursors["dynamic"] == Cursor("7695069095121681125", 20)

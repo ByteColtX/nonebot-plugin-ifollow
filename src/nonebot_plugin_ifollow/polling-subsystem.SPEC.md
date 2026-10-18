@@ -40,7 +40,9 @@ depends-on: [models, media, douyin-fetch, bilibili-fetch]
   被删除」「游标没有时间」这类特例。
 - 每个 feed 每轮最多补发 `IFOLLOW_SUB_MAX_ITEMS` 条（默认 5）：超出时保留最新几条，更早的
   静默跳过，游标跟着推进到最新已发的那条，并记一条 warning。
-- 跨 feed 去重靠每个目标最近 50 个已发标识的环形缓冲，不再依赖本轮抓取窗口。
+- 跨 feed 去重靠「每个作者 × 每个目标」最近 50 个已发标识的环形缓冲，不再依赖本轮抓取窗口。
+  必须按作者分组：`PlatformWork.identity` 只在平台内唯一，抖音 `aweme_id` 与 B 站动态 id
+  都是 19 位数字，共享缓冲会把另一个作者的作品误判成已发。
 
 ## 失败处理
 

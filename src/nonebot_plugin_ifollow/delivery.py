@@ -26,7 +26,7 @@ from .settings import Settings
 from .status import RoundStats, platform_name
 
 SENT_MEMORY = 50
-"""每个目标记住最近多少个已发作品标识，用于跨 feed 去重。"""
+"""每个作者在每个目标上记住最近多少个已发标识，用于同一作者的跨 feed 去重。"""
 
 AttemptKey = tuple[str, str, str, str]
 
@@ -43,7 +43,7 @@ class DeliveryContext:
     recent_abandoned: deque[tuple[str, str]] = field(
         default_factory=lambda: deque(maxlen=5)
     )
-    sent: dict[str, deque[str]] = field(default_factory=dict)
+    sent: dict[tuple[str, str], deque[str]] = field(default_factory=dict)
 
 
 def attempt_key(
@@ -64,10 +64,17 @@ def media_for(
     return bilibili_media_messages(work, settings)
 
 
-def sent_identities(ctx: DeliveryContext, target_key: str) -> deque[str]:
-    """取某个目标的已发标识环形缓冲。"""
+def sent_identities(
+    ctx: DeliveryContext, author_key: str, target_key: str
+) -> deque[str]:
+    """取「某作者 × 某目标」的已发标识环形缓冲。
 
-    return ctx.sent.setdefault(target_key, deque(maxlen=SENT_MEMORY))
+    按作者分组是必须的：``PlatformWork.identity`` 只在平台内唯一，跨平台可能出现相同
+    标识（抖音 aweme_id 与 B 站动态 id 都是 19 位数字），共享缓冲会把另一个作者的
+    作品误判成已发。
+    """
+
+    return ctx.sent.setdefault((author_key, target_key), deque(maxlen=SENT_MEMORY))
 
 
 async def deliver_author(
@@ -161,7 +168,7 @@ async def deliver_work(
 
     sendable: list[str] = []
     for target_key in target_keys:
-        if work.identity in sent_identities(ctx, target_key):
+        if work.identity in sent_identities(ctx, author.key, target_key):
             await advance(ctx, author, target_key, feed, work)
             continue
         sendable.append(target_key)
@@ -180,7 +187,7 @@ async def deliver_work(
                     continue
                 ctx.permanent_targets.discard(target_key)
                 ctx.attempts.pop(attempt_key(author, target_key, feed, work), None)
-                sent_identities(ctx, target_key).append(work.identity)
+                sent_identities(ctx, author.key, target_key).append(work.identity)
                 await advance(ctx, author, target_key, feed, work)
                 ctx.stats.delivered += 1
     except Exception as exc:
@@ -305,9 +312,14 @@ def prune(ctx: DeliveryContext, authors: dict[str, AuthorSubscription]) -> None:
         target_key for author in authors.values() for target_key in author.targets
     }
     ctx.permanent_targets.intersection_update(active_targets)
-    for target_key in list(ctx.sent):
-        if target_key not in active_targets:
-            del ctx.sent[target_key]
+    active_pairs = {
+        (author.key, target_key)
+        for author in authors.values()
+        for target_key in author.targets
+    }
+    for pair in list(ctx.sent):
+        if pair not in active_pairs:
+            del ctx.sent[pair]
 
 
 def iter_feeds(platform: str) -> Iterator[FeedKind]:
