@@ -395,57 +395,42 @@ async def test_unsubscribe_superuser_cancels_legacy_entry(env: Any) -> None:
     assert await store.snapshot() == {}
 
 
+class FakeBot:
+    """只实现 get_msg 的 bot，用来喂被引用的消息正文。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    async def call_api(self, api: str, **kwargs: Any) -> dict[str, Any]:
+        assert api == "get_msg"
+        return {"message": self.text}
+
+
 @pytest.mark.asyncio
 async def test_quoted_author_parses_notice() -> None:
     """引用通知时能从首行认出平台和作者。"""
 
-    reply = Reply(
-        "123",
+    text = (
         "抖音 · 01年的小女孩 发布了新作品\n"
         "────────────\n"
         "#泳装搭配指南👙\n"
         "\n"
         "00:06 · 720×1280 · 2.5 MB\n"
-        "2026-10-19 01:39",
+        "2026-10-19 01:39"
     )
 
-    assert await commands.quoted_author(reply, Mock()) == ("抖音", "01年的小女孩")
+    assert await commands.quoted_author(Reply("123"), FakeBot(text)) == (
+        "抖音",
+        "01年的小女孩",
+    )
 
 
 @pytest.mark.asyncio
 async def test_quoted_author_returns_none_for_other_text() -> None:
     """引用的不是爱播通知时认不出来。"""
 
-    reply = Reply("123", "随便聊两句\n没有通知")
-
-    assert await commands.quoted_author(reply, Mock()) is None
-    assert await commands.quoted_author(None, Mock()) is None
-
-
-@pytest.mark.asyncio
-async def test_quoted_author_accepts_native_message() -> None:
-    """适配器原生 Message（没被包成 Reply）也能读。"""
-
-    class Native:
-        def extract_plain_text(self) -> str:
-            return "抖音 · 作者 发布了新作品"
-
-    assert await commands.quoted_author(Native(), Mock()) == ("抖音", "作者")
-
-
-@pytest.mark.asyncio
-async def test_quoted_author_fetches_from_get_msg() -> None:
-    """OneBot 的 reply 段里只有消息 ID，正文要回查 get_msg。"""
-
-    class FakeBot:
-        async def call_api(self, api: str, **kwargs: Any) -> dict[str, Any]:
-            assert api == "get_msg"
-            assert kwargs["message_id"] == 123
-            return {"message": "抖音 · 作者 发布了新作品\n────"}
-
-    reply = Reply("123")  # 和线上一样：msg 是 None
-
-    assert await commands.quoted_author(reply, FakeBot()) == ("抖音", "作者")
+    assert await commands.quoted_author(Reply("123"), FakeBot("随便聊两句")) is None
+    assert await commands.quoted_author(None, FakeBot("随便聊两句")) is None
 
 
 @pytest.mark.asyncio
@@ -455,9 +440,11 @@ async def test_unsubscribe_from_quoted_notice(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)  # 订阅人是 42
     event = make_event(user_id="42")
-    event.reply = Reply("123", "抖音 · 作者 发布了新作品\n────")
+    event.reply = Reply("123")
 
-    await commands.unsubscribe(event, Mock(), args(""))
+    await commands.unsubscribe(
+        event, FakeBot("抖音 · 作者 发布了新作品\n────"), args("")
+    )
 
     assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
     assert await store.snapshot() == {}
@@ -470,10 +457,12 @@ async def test_unsubscribe_from_quoted_notice_unknown_author(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)
     event = make_event(user_id="42")
-    event.reply = Reply("123", "抖音 · 别人 发布了新作品\n────")
+    event.reply = Reply("123")
 
     with pytest.raises(FinishedException):
-        await commands.unsubscribe(event, Mock(), args(""))
+        await commands.unsubscribe(
+            event, FakeBot("抖音 · 别人 发布了新作品\n────"), args("")
+        )
 
     assert "没找到「别人」的订阅" in FakeUniMessage.sent[0]
     assert len(await store.snapshot()) == 1

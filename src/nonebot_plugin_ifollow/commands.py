@@ -154,34 +154,24 @@ def _text_of(msg: Any) -> str:
 async def _reply_text(reply: Any, bot: Bot) -> str:
     """取出被引用消息的纯文本。
 
-    alconna 会把 ``event.reply`` 包成 uniseg 的 ``Reply``；OneBot 的 reply 段
-    里只有消息 ID，拿不到正文，所以得回查 ``get_msg``。
+    alconna 把 ``event.reply`` 包成 uniseg 的 ``Reply``，OneBot 的 reply 段里
+    只有消息 ID，正文要回查 ``get_msg``。
 
     Args:
-        reply: 被引用的消息，可能是 ``Reply``，也可能是适配器原生消息。
-        bot: 当前 bot，用于回查被引用的消息。
+        reply: 被引用的消息。
+        bot: 当前 bot。
 
     Returns:
-        纯文本；取不到时返回空串。
+        纯文本；回查失败时返回空串并记一条 warning。
     """
 
-    if callable(getattr(reply, "extract_plain_text", None)):
-        return _text_of(reply)
-    msg = getattr(reply, "msg", None)
-    if msg is not None:
-        return _text_of(msg)
-    origin = getattr(reply, "origin", None)
-    data = getattr(origin, "data", None)
-    if isinstance(data, dict) and data.get("text"):
-        return str(data["text"])
     message_id = getattr(reply, "id", None)
-    call_api = getattr(bot, "call_api", None)
-    if not message_id or not callable(call_api):
+    if not message_id:
         return ""
     try:
-        fetched = await call_api("get_msg", message_id=int(message_id))
-    except Exception:  # 回查失败就当作认不出
-        logger.debug(f"回查被引用消息失败：{message_id}")
+        fetched = await bot.call_api("get_msg", message_id=int(message_id))
+    except Exception as exc:  # 协议端不支持或消息已过期
+        logger.warning(f"回查被引用消息失败：{message_id} {type(exc).__name__}: {exc}")
         return ""
     return _text_of(fetched.get("message") or fetched.get("raw_message"))
 
