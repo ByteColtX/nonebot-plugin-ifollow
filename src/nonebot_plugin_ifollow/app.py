@@ -31,7 +31,7 @@ def runtime() -> Runtime:
         RuntimeError: 插件尚未完成装配。
     """
 
-    if _runtime is None:  # pragma: no cover - 只会在装配前被调用
+    if _runtime is None:
         raise RuntimeError("爱播插件尚未初始化")
     return _runtime
 

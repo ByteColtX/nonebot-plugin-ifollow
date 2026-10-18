@@ -299,6 +299,24 @@ async def test_unsubscribe_reports_missing_subscription(
     assert FakeUniMessage.sent == ["当前会话没有你的这个订阅。"]
 
 
+def test_target_subscriptions_preserve_insertion_order() -> None:
+    """列表命令与序号取消依赖同一个稳定顺序。"""
+
+    target = Target.group("group")
+    key = make_target_key(target.dump())
+    first = AuthorSubscription(
+        "douyin", "1", "先订阅", {key: TargetSubscription(target.dump())}
+    )
+    second = AuthorSubscription(
+        "bilibili", "2", "后订阅", {key: TargetSubscription(target.dump())}
+    )
+    authors = {first.key: first, second.key: second}
+
+    items = commands.formatting.target_subscriptions(authors, key)
+
+    assert [author.author_id for author in items] == ["1", "2"]
+
+
 def test_match_subscription_uses_id_handle_and_url() -> None:
     douyin = AuthorSubscription(
         "douyin",

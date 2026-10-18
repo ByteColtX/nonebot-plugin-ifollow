@@ -82,8 +82,12 @@ def patch_media(
     *,
     error: Exception | None = None,
     fail_for: str | None = None,
+    fail_works: set[str] | None = None,
 ) -> list[str]:
-    """替换解析下载上下文，返回「准备过哪些作品」的记录。"""
+    """替换解析下载上下文，返回「准备过哪些作品」的记录。
+
+    ``fail_for`` 让指定目标的发送失败，``fail_works`` 让指定作品的解析失败。
+    """
 
     prepared: list[str] = []
 
@@ -92,7 +96,11 @@ def patch_media(
         work: PlatformWork, _settings: Settings
     ) -> AsyncIterator[list[FakeMessage]]:
         prepared.append(work.work_id)
-        if error is not None and fail_for is None:
+        if (
+            error is not None
+            and fail_for is None
+            and (fail_works is None or work.work_id in fail_works)
+        ):
             raise error
         yield [FakeMessage(work, sent, fail_for, error or RuntimeError())]
 
@@ -288,9 +296,7 @@ async def test_kicked_group_only_skips_that_target(
 
     assert sent == ["new"]
     snapshot = await store.snapshot()
-    assert cursor_of(snapshot, first) is None or cursor_of(snapshot, first) == Cursor(
-        "old", 1
-    )
+    assert cursor_of(snapshot, first) == Cursor("old", 1)
     assert cursor_of(snapshot, second) == Cursor("new", 2)
     assert first in poller.context.permanent_targets
 
@@ -489,9 +495,31 @@ def test_delivery_context_prune_clears_sent_buffers(tmp_path: Path) -> None:
     assert poller.context.sent == {}
 
 
-def test_media_for_returns_douyin_context() -> None:
-    work = make_work("w", 1)
-    work = PlatformWork(
+@pytest.mark.asyncio
+async def test_media_for_selects_pipeline_by_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """抖音与 B 站各走自己的媒体管线。"""
+
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def douyin_pipeline(
+        _work: PlatformWork, _settings: Settings
+    ) -> AsyncIterator[list[Any]]:
+        calls.append("douyin")
+        yield []
+
+    @asynccontextmanager
+    async def bilibili_pipeline(
+        _work: PlatformWork, _settings: Settings
+    ) -> AsyncIterator[list[Any]]:
+        calls.append("bilibili")
+        yield []
+
+    monkeypatch.setattr(delivery, "douyin_media_messages", douyin_pipeline)
+    monkeypatch.setattr(delivery, "bilibili_media_messages", bilibili_pipeline)
+    douyin_work = PlatformWork(
         platform="douyin",
         work_id="w",
         url="https://www.douyin.com/video/1",
@@ -500,6 +528,94 @@ def test_media_for_returns_douyin_context() -> None:
         create_time=1,
         author=AuthorInfo("1", "作者", "1"),
     )
-    context: Any = delivery.media_for(work, SETTINGS)
 
-    assert hasattr(context, "__aenter__")
+    async with delivery.media_for(douyin_work, SETTINGS):
+        pass
+    async with delivery.media_for(make_work("w", 1), SETTINGS):
+        pass
+
+    assert calls == ["douyin", "bilibili"]
+
+
+@pytest.mark.asyncio
+async def test_deliver_author_refreshes_author_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """投递时用最新作品刷新作者昵称与最近更新时间。"""
+
+    store, author, (target_key,) = await make_author(tmp_path, "group")
+    patch_media(monkeypatch, [])
+    poller = Poller(store, SETTINGS)
+
+    await delivery.deliver_author(
+        poller.context, author, {"video": [make_work("new", 5)]}
+    )
+
+    snapshot = await store.snapshot()
+    assert snapshot["bilibili:123"].last_update_time == 5
+    assert snapshot["bilibili:123"].author_name == "作者"
+    assert cursor_of(snapshot, target_key) == Cursor("new", 5)
+
+
+@pytest.mark.asyncio
+async def test_abandoned_work_does_not_block_newer_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一个作品坏掉时，更新的作品在同一轮里照样发出去。"""
+
+    store, author, (target_key,) = await make_author(tmp_path, "group")
+    sent: list[str] = []
+    patch_media(
+        monkeypatch,
+        sent,
+        error=ContentUnavailableError("视频已删除"),
+        fail_works={"bad"},
+    )
+    poller = Poller(store, SETTINGS)
+
+    await delivery.deliver_feed(
+        poller.context,
+        author,
+        "video",
+        [make_work("new", 3), make_work("bad", 2), make_work("old", 1)],
+    )
+
+    assert sent == ["new"]
+    assert cursor_of(await store.snapshot(), target_key) == Cursor("new", 3)
+    assert poller.context.stats.abandoned == 1
+
+
+@pytest.mark.asyncio
+async def test_cursor_work_deleted_still_sends_newer_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """游标作品被作者删除后，靠发布时间仍能判断新旧。"""
+
+    store, author, (target_key,) = await make_author(
+        tmp_path, "group", cursors={"video": Cursor("gone", 2)}
+    )
+    sent: list[str] = []
+    patch_media(monkeypatch, sent)
+    poller = Poller(store, SETTINGS)
+
+    await delivery.deliver_feed(poller.context, author, "video", [make_work("new", 5)])
+
+    assert sent == ["new"]
+    assert cursor_of(await store.snapshot(), target_key) == Cursor("new", 5)
+
+
+@pytest.mark.asyncio
+async def test_work_older_than_cursor_is_not_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, author, (target_key,) = await make_author(
+        tmp_path, "group", cursors={"video": Cursor("gone", 2)}
+    )
+    sent: list[str] = []
+    patch_media(monkeypatch, sent)
+    poller = Poller(store, SETTINGS)
+
+    await delivery.deliver_feed(poller.context, author, "video", [make_work("old", 1)])
+
+    assert sent == []
+    assert cursor_of(await store.snapshot(), target_key) == Cursor("gone", 2)
