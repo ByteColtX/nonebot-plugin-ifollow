@@ -16,7 +16,8 @@ depends-on: [media]
 
 - 输入：`Settings`、作者主页链接 / 作品链接 / `sec_user_id`，或轮询时的 `sec_user_id`。
 - 输出：`ResolvedAuthor`（作者 + 首页作品）或 `list[PlatformWork]`（从新到旧）。
-- 错误：只抛 `errors.TransientError` / `PermanentError`，不再自带 `retryable` 标志。
+- 错误：网络与平台错误只抛 `errors.TransientError` / `PermanentError`（不再自带 `retryable`
+  标志）；输入无法识别时抛 `ValueError`，不进入重试。
 - 不负责翻页策略、历史回填与视频下载；翻页交给 `pagination.paginate`，下载交给 `media.py`。
 
 ## 接口契约

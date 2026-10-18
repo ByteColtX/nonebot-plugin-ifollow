@@ -34,8 +34,9 @@ uvx pre-commit run --all-files
 
 - 新增测试放在 `tests/test_<module>.py`；异步场景使用 `pytest-asyncio`；抖音解析修改覆盖成功、空列表、
   无效响应和 HTTP 错误。
-- HTTP、parsehub、媒体渲染和消息发送必须 mock，禁止依赖真实 Cookie、抖音接口、ffmpeg 或外部服务。
-- 使用 `AsyncMock`、`monkeypatch` 隔离依赖。
+- HTTP、parsehub 与消息发送必须 mock：HTTP 走 `tests/http_stub.py`（`httpx.MockTransport`），
+  parsehub 与 alconna 发送用替身；禁止依赖真实 Cookie、抖音接口、ffmpeg 或外部服务。
+- 依赖隔离优先用 `monkeypatch` 与 `tests/http_stub.py` 的 `Stub`；需要替身异步方法时才用 `AsyncMock`。
 ## Code style
 
 - 遵循 Google Python Style Guide，行宽 88；公共 API 需要 Google docstring、参数和返回值类型注解；
@@ -45,7 +46,7 @@ uvx pre-commit run --all-files
 ## Project-specific invariants
 
 - 首次订阅只记录当前最新作品，不补发历史作品；作品成功发送后才能更新游标；发送失败必须保留游标，
-  以便重试；轮询锁避免重入，作者异常不得中断其他作者。
+  以便重试；同一时刻只跑一个轮询任务、抓取并发有上限，作者异常不得中断其他作者。
 - 使用作者级退避和有界请求，不使用无界并发；发送重试与作者轮询状态只保存在运行时。
 
 ## Change workflow
