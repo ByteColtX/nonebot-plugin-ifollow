@@ -29,10 +29,6 @@ class Stub:
         index = min(len(self.requests) - 1, len(self._responses) - 1)
         return self._responses[index]
 
-    @property
-    def last(self) -> httpx.Request:
-        return self.requests[-1]
-
 
 def install(monkeypatch: pytest.MonkeyPatch, stub: Stub) -> Stub:
     """把 ``httpx.AsyncClient`` 换成走 MockTransport 的客户端。"""

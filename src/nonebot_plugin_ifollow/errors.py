@@ -17,7 +17,3 @@ class TransientError(IfollowError):
 
 class PermanentError(IfollowError):
     """重试无意义：作者不存在、作品已删除、平台不支持。"""
-
-
-class AuthError(PermanentError):
-    """凭证或签名失效，且自愈失败。"""

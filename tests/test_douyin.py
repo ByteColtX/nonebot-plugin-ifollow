@@ -386,3 +386,21 @@ def test_extract_sec_user_id_from_page_unescapes() -> None:
     page = "https:\\/\\/www.douyin.com\\/user\\/MS4wLjABAAAA-page"
 
     assert douyin._extract_sec_user_id_from_page(page) == "MS4wLjABAAAA-page"
+
+
+@pytest.mark.asyncio
+async def test_resolve_sec_user_id_adds_missing_scheme(client: Any) -> None:
+    """用户粘贴没有协议头的作品链接时补上 https://，而不是抛 UnsupportedProtocol。"""
+
+    stub = client(
+        [
+            response(content=b""),
+            response(data={"aweme_detail": {"author": {"sec_uid": "MS4wLjABAAAA-x"}}}),
+        ]
+    )
+
+    assert (
+        await douyin.resolve_sec_user_id(SETTINGS, "www.douyin.com/video/123")
+        == "MS4wLjABAAAA-x"
+    )
+    assert str(stub.requests[0].url).startswith("https://www.douyin.com/video/123")

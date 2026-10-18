@@ -9,10 +9,10 @@ from datetime import datetime
 import httpx
 
 from .errors import PermanentError, TransientError
-from .media import SEPARATOR
 from .models import AuthorSubscription
 from .platforms import Platform
 from .status import platform_name
+from .style import SEPARATOR
 
 HELP_MESSAGE = (
     "爱播帮助\n"

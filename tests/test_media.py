@@ -15,10 +15,10 @@ def make_file(path: Path, **extra: Any) -> SimpleNamespace:
     return SimpleNamespace(path=path, **extra)
 
 
-def policy(max_bytes: int = 0) -> media.MediaPolicy:
+def policy(max_bytes: int = 0, *, base64_media: bool = False) -> media.MediaPolicy:
     """构造媒体策略。"""
 
-    return media.MediaPolicy(max_bytes=max_bytes)
+    return media.MediaPolicy(max_bytes=max_bytes, base64_media=base64_media)
 
 
 def write(path: Path, size: int = 8, suffix: str = ".png") -> Path:
@@ -77,7 +77,10 @@ async def test_media_messages_sends_single_video(tmp_path: Path) -> None:
     video = write(tmp_path / "work", size=1049051, suffix=".mp4")
 
     bundle = await media.media_messages(
-        [make_file(video, duration=7534, width=720, height=1280)], 0, "抖音", "ms"
+        [make_file(video, duration=7534, width=720, height=1280)],
+        policy(),
+        "抖音",
+        "ms",
     )
 
     assert len(bundle.messages) == 1
@@ -90,7 +93,7 @@ async def test_media_messages_sends_single_video(tmp_path: Path) -> None:
 async def test_media_messages_treats_uppercase_suffix_as_video(tmp_path: Path) -> None:
     video = write(tmp_path / "work", suffix=".MP4")
 
-    bundle = await media.media_messages([make_file(video)], 0, "B站")
+    bundle = await media.media_messages([make_file(video)], policy(), "B站")
 
     assert [segment.type for segment in bundle.messages[0]] == ["video"]
 
@@ -101,7 +104,7 @@ async def test_media_messages_batches_images(tmp_path: Path) -> None:
         for index in range(media.IMAGE_BATCH_SIZE + 1)
     ]
 
-    bundle = await media.media_messages(files, 0, "B站")
+    bundle = await media.media_messages(files, policy(), "B站")
 
     assert [len(message) for message in bundle.messages] == [
         media.IMAGE_BATCH_SIZE,
@@ -119,7 +122,7 @@ async def test_media_messages_caps_total_media(tmp_path: Path) -> None:
         for index in range(media.MAX_MEDIA_COUNT + 5)
     ]
 
-    bundle = await media.media_messages(files, 0, "B站")
+    bundle = await media.media_messages(files, policy(), "B站")
 
     assert sum(len(message) for message in bundle.messages) == media.MAX_MEDIA_COUNT
 
@@ -127,7 +130,7 @@ async def test_media_messages_caps_total_media(tmp_path: Path) -> None:
 async def test_media_messages_skips_oversized_file(tmp_path: Path) -> None:
     big = write(tmp_path / "big", size=64)
 
-    bundle = await media.media_messages([make_file(big)], max_bytes=8, label="抖音")
+    bundle = await media.media_messages([make_file(big)], policy(8), "抖音")
 
     assert bundle.messages == []
     assert bundle.count == 0
@@ -136,7 +139,7 @@ async def test_media_messages_skips_oversized_file(tmp_path: Path) -> None:
 async def test_media_messages_skips_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "missing.png"
 
-    bundle = await media.media_messages([make_file(missing)], 0, "抖音")
+    bundle = await media.media_messages([make_file(missing)], policy(), "抖音")
 
     assert bundle.messages == []
 
@@ -148,7 +151,7 @@ async def test_media_messages_sends_live_photo_as_image_and_video(
     video = write(tmp_path / "live-motion", suffix=".mp4")
 
     bundle = await media.media_messages(
-        [make_file(image, video_path=video, duration=3000)], 0, "抖音", "ms"
+        [make_file(image, video_path=video, duration=3000)], policy(), "抖音", "ms"
     )
 
     assert [segment.type for message in bundle.messages for segment in message] == [
@@ -164,7 +167,7 @@ async def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
     download = SimpleNamespace(media=[make_file(image)])
 
     messages = await media.build_messages(
-        result, download, META, label="B站", max_bytes=0
+        result, download, META, label="B站", policy=policy()
     )
 
     assert (
@@ -181,7 +184,9 @@ async def test_media_segments_use_local_path_by_default(tmp_path: Path) -> None:
     video = write(tmp_path / "work", suffix=".mp4")
     image = write(tmp_path / "img")
 
-    bundle = await media.media_messages([make_file(video), make_file(image)], 0, "抖音")
+    bundle = await media.media_messages(
+        [make_file(video), make_file(image)], policy(), "抖音"
+    )
 
     segments = [segment for message in bundle.messages for segment in message]
     assert segments
@@ -196,7 +201,7 @@ async def test_media_segments_switch_to_base64_when_enabled(tmp_path: Path) -> N
     video = write(tmp_path / "work", suffix=".mp4")
 
     bundle = await media.media_messages(
-        [make_file(video)], 0, "抖音", base64_media=True
+        [make_file(video)], policy(base64_media=True), "抖音"
     )
 
     (segment,) = list(bundle.messages[0])
@@ -342,3 +347,15 @@ async def test_media_messages_for_skips_download_when_everything_is_too_big(
         assert messages[0].extract_plain_text().startswith("呆呆丸 发布了新作品")
 
     assert media_at_download == [None]
+
+
+async def test_policy_limits_count_and_image_batch(tmp_path: Path) -> None:
+    """数量上限与图片批次来自策略对象，不是写死的常量。"""
+
+    files = [make_file(write(tmp_path / f"img{index}")) for index in range(5)]
+    custom = media.MediaPolicy(max_bytes=0, max_count=3, image_batch=2)
+
+    bundle = await media.media_messages(files, custom, "抖音")
+
+    assert bundle.count == 3
+    assert [len(message) for message in bundle.messages] == [2, 1]

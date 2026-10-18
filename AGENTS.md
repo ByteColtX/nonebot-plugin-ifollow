@@ -16,7 +16,8 @@
   `errors.py` 是统一错误模型。
 - 媒体层：`media.py` 使用 ParseHub 解析并下载媒体，`douyin_media.py` / `bilibili_media.py`
   把 `Settings` 换算成 `MediaPolicy` 并传入平台 Cookie。
-- 命令层：`commands.py` 注册命令，`formatting.py` 出文案，`reply.py` 解析被引用消息。
+- 命令层：`commands.py` 注册命令，`formatting.py` 出文案（含失败错误码），`reply.py` 解析
+  被引用消息，`style.py` 放所有消息共用的分隔线常量。
 ## Dev environment tips
 所有 Python 命令使用 `uv` 或 `uvx`，不直接使用 `python`、`pip` 或 `pipx`。
 

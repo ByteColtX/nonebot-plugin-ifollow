@@ -102,8 +102,12 @@ async def resolve_sec_user_id(settings: Settings, value: str) -> str:
     if not matched:
         raise ValueError("请输入抖音作者主页链接、作品分享链接，或直接输入 sec_user_id")
 
+    target = matched.group(0)
+    if not target.startswith(("http://", "https://")):
+        target = f"https://{target}"
+
     async with _client(settings) as client:
-        response = await client.get(matched.group(0))
+        response = await client.get(target)
         response.raise_for_status()
         final_url = str(response.url)
         if sec_user_id := extract_sec_user_id(final_url):

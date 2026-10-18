@@ -114,6 +114,8 @@ class Poller:
             *(run(author) for author in due), return_exceptions=True
         )
         for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
             if isinstance(result, BaseException):
                 logger.opt(exception=result).warning("爱播轮询任务异常")
         self.stats.duration = time.monotonic() - started
