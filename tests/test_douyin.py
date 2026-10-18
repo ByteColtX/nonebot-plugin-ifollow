@@ -377,6 +377,31 @@ async def test_resolve_author_uses_latest_work(client: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_author_backfills_handle_from_profile(client: Any) -> None:
+    """作品列表不带抖音号时，用主页资料补上，订阅列表才不会缺 ID。"""
+
+    payload = _works_payload(count=1)
+    payload["aweme_list"][0]["author"] = {"nickname": "作者"}
+    created = client(
+        [
+            response(data=payload),
+            response(
+                data={
+                    "status_code": 0,
+                    "user": {"nickname": "作者", "unique_id": "30086054030"},
+                }
+            ),
+        ]
+    )
+
+    resolved = await douyin.resolve_author(SETTINGS, "MS4wLjABAAAA-test")
+
+    assert resolved.author.handle == "30086054030"
+    assert len(created.requests) == 2
+    assert created.requests[1].url.path == "/aweme/v1/web/user/profile/other/"
+
+
+@pytest.mark.asyncio
 async def test_resolve_author_falls_back_to_profile(client: Any) -> None:
     client(
         [

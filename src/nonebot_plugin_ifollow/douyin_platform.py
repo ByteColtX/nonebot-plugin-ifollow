@@ -86,7 +86,17 @@ async def resolve_author(settings: Settings, value: str) -> ResolvedAuthor:
     sec_user_id = await resolve_sec_user_id(settings, value)
     works = await fetch(settings, sec_user_id, "video", None)
     if works:
-        return ResolvedAuthor(works[0].author, {"video": works})
+        author = works[0].author
+        if not author.handle:
+            # 作品列表接口的 author 不带抖音号（unique_id/short_id 均为空），
+            # 只有主页资料接口有；不补的话订阅列表里这条会一直显示不出 ID。
+            name, handle = await fetch_author_profile(settings, sec_user_id)
+            author = AuthorInfo(
+                author_id=author.author_id,
+                name=name or author.name,
+                handle=handle,
+            )
+        return ResolvedAuthor(author, {"video": works})
     name, handle = await fetch_author_profile(settings, sec_user_id)
     author = AuthorInfo(sec_user_id, name or sec_user_id, handle)
     return ResolvedAuthor(author, {"video": works})
