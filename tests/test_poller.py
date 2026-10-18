@@ -684,3 +684,39 @@ async def test_sent_memory_is_scoped_per_author(
     snapshot = await store.snapshot()
     cursors = snapshot["bilibili:b1"].targets[target_key].cursors
     assert cursors["dynamic"] == Cursor("7695069095121681125", 20)
+
+
+@pytest.mark.asyncio
+async def test_send_work_appends_subscriber_mentions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """订阅人提醒拼在文案末尾，不额外多发一条消息。"""
+
+    sent: list[tuple[str, str]] = []
+
+    class RecordingMessage:
+        def __init__(self, text: str = "") -> None:
+            self.text = text
+
+        def __add__(self, other: Any) -> RecordingMessage:
+            extra = other.text if isinstance(other, RecordingMessage) else str(other)
+            return RecordingMessage(self.text + extra)
+
+        @staticmethod
+        def at(user_id: str) -> RecordingMessage:
+            return RecordingMessage(f"@{user_id}")
+
+        async def send(self, *, target: Target) -> None:
+            sent.append((self.text, target.id))
+
+    monkeypatch.setattr(delivery, "UniMessage", RecordingMessage)
+    target = Target.group("group")
+    state = TargetSubscription(target.dump(), subscriber_ids=["1", "2"])
+
+    await delivery.send_work([RecordingMessage("文案")], state)  # type: ignore[list-item]
+
+    text, target_id = sent[0]
+    assert target_id == "group"
+    assert delivery.SEPARATOR in text
+    assert "@1" in text
+    assert "@2" in text

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 
@@ -19,11 +18,11 @@ from .failures import (
     is_permanent_work_error,
     short_reason,
 )
-from .media import SEPARATOR
 from .models import AuthorSubscription, SubscriptionStore, TargetSubscription
 from .platforms import Cursor, FeedKind, PlatformWork, is_newer
 from .settings import Settings
 from .status import RoundStats, platform_name
+from .style import SEPARATOR
 
 SENT_MEMORY = 50
 """每个作者在每个目标上记住最近多少个已发标识，用于同一作者的跨 feed 去重。"""
@@ -117,7 +116,13 @@ async def deliver_feed(
         if cursor is None:
             await advance(ctx, author, target_key, feed, works[0])
             continue
-        unseen = _unseen(works, cursor, ctx.settings.max_items)
+        unseen, dropped = _unseen(works, cursor, ctx.settings.max_items)
+        if dropped:
+            logger.warning(
+                f"{platform_name(author.platform)}作者 {author.author_id} 的 {feed} "
+                f"积压 {len(unseen) + dropped} 条，只补发最新 "
+                f"{ctx.settings.max_items} 条，其余 {dropped} 条不再补发"
+            )
         if unseen:
             pending[target_key] = unseen
     if not pending:
@@ -142,18 +147,14 @@ async def deliver_feed(
 
 def _unseen(
     works: list[PlatformWork], cursor: Cursor, limit: int
-) -> list[PlatformWork]:
-    """返回游标之后的新作品，最旧在前，超过补发上限时保留最新的几条。"""
+) -> tuple[list[PlatformWork], int]:
+    """返回游标之后的新作品（最旧在前）与被跳过的条数。"""
 
     unseen = [work for work in works if is_newer(work, cursor)]
     unseen.reverse()
     if len(unseen) > limit:
-        logger.warning(
-            f"积压 {len(unseen)} 条，只补发最新 {limit} 条，"
-            f"其余 {len(unseen) - limit} 条不再补发"
-        )
-        return unseen[-limit:]
-    return unseen
+        return unseen[-limit:], len(unseen) - limit
+    return unseen, 0
 
 
 async def deliver_work(
@@ -320,13 +321,6 @@ def prune(ctx: DeliveryContext, authors: dict[str, AuthorSubscription]) -> None:
     for pair in list(ctx.sent):
         if pair not in active_pairs:
             del ctx.sent[pair]
-
-
-def iter_feeds(platform: str) -> Iterator[FeedKind]:
-    """返回平台的基础 feed，动态开关由 Settings 决定。"""
-
-    del platform
-    yield "video"
 
 
 __all__ = [

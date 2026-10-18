@@ -345,12 +345,19 @@ class SubscriptionStore:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[SubscriptionStore]:
-        """在边界处批量落盘；异常时也会把已生效的改动写回。"""
+        """在边界处批量落盘；异常时也会把已生效的改动写回。
+
+        落盘失败只告警、不向上抛：否则磁盘错误会盖掉业务异常，而且改动仍是脏的，
+        下一次 flush 会重试。
+        """
 
         try:
             yield self
         finally:
-            await self.flush()
+            try:
+                await self.flush()
+            except OSError as exc:
+                logger.warning(f"爱播订阅数据写入失败，改动保留在内存待重试：{exc}")
 
     def _serialize(self) -> str:
         payload = {

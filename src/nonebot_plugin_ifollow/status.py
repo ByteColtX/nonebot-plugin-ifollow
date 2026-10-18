@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .failures import WORK_RETRY_LIMIT
-from .media import SEPARATOR
 from .models import AuthorSubscription
 from .settings import Settings
+from .style import SEPARATOR
 
 
 @dataclass

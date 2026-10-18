@@ -183,3 +183,32 @@ def test_author_key_is_namespaced() -> None:
     author = AuthorSubscription("douyin", "sec", "作者")
 
     assert author.key == "douyin:sec"
+
+
+@pytest.mark.asyncio
+async def test_transaction_flush_failure_keeps_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """磁盘写入失败不能盖掉业务异常，且改动保持脏状态以便重试。"""
+
+    store = SubscriptionStore(tmp_path)
+    writes: list[str] = []
+
+    def boom(text: str) -> None:
+        writes.append(text)
+        raise OSError("磁盘已满")
+
+    monkeypatch.setattr(store, "_write", boom)
+
+    async def failing_transaction() -> None:
+        async with store.transaction():
+            await store.add_target("bilibili", "1", "作者", "k", {"id": "g"}, {})
+            raise ValueError("业务异常")
+
+    with pytest.raises(ValueError, match="业务异常"):
+        await failing_transaction()
+
+    monkeypatch.setattr(store, "_write", lambda text: writes.append(text))
+    await store.flush()
+
+    assert len(writes) == 2

@@ -570,3 +570,88 @@ def test_render_failure_has_no_stack_details() -> None:
 
     assert "Traceback" not in text
     assert text.endswith("错误码 E-INPUT")
+
+
+@pytest.mark.asyncio
+async def test_subscribe_rejects_unrecognised_input(env: Any) -> None:
+    """识别不出平台时直接给 E-INPUT，而不是把异常字符串丢进群。"""
+
+    with pytest.raises(FinishedException):
+        await commands.subscribe(make_event(), Mock(), args("随便一段文字"))
+
+    assert FakeUniMessage.sent[0].startswith("订阅失败：没能识别这个链接")
+    assert FakeUniMessage.sent[0].endswith("错误码 E-INPUT")
+
+
+@pytest.mark.asyncio
+async def test_subscribe_race_falls_back_to_duplicate_message(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """add_target 期间被别人抢先写入时，退回「无需重复」。"""
+
+    store, _ = env
+    monkeypatch.setattr(commands, "detect", lambda _value: FakeAdapter())
+    monkeypatch.setattr(store, "add_target", AsyncMock(return_value=False))
+    monkeypatch.setattr(store, "add_subscriber", AsyncMock(return_value=False))
+
+    await commands.subscribe(make_event(), Mock(), args("sec"))
+
+    assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 作者，无需重复。"
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_requires_a_value(env: Any) -> None:
+    with pytest.raises(FinishedException):
+        await commands.unsubscribe(make_event(), Mock(), args(""))
+
+    assert FakeUniMessage.sent == ["用法：爱播取消订阅 <序号、作者 ID、昵称或链接>"]
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_keeps_other_subscribers(env: Any) -> None:
+    """只删掉自己的提醒，其他订阅人仍保留。"""
+
+    store, _ = env
+    key = await seed_subscription(store)
+    await store.add_subscriber("douyin", "sec", key, "43")
+
+    await commands.unsubscribe(make_event(), Mock(), args("sec"))
+
+    assert FakeUniMessage.sent == [
+        "已取消你在 抖音 · 作者 的提醒，其他订阅人仍会收到通知。"
+    ]
+    snapshot = await store.snapshot()
+    assert snapshot["douyin:sec"].targets[key].subscriber_ids == ["43"]
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_rejects_unrecognised_input(env: Any) -> None:
+    store, _ = env
+    await seed_subscription(store)
+
+    with pytest.raises(FinishedException):
+        await commands.unsubscribe(make_event(), Mock(), args("随便一段文字"))
+
+    assert FakeUniMessage.sent[0].endswith("错误码 E-INPUT")
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_network_failure_uses_platform_code(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nonebot_plugin_ifollow.errors import TransientError
+
+    store, _ = env
+    await seed_subscription(store)
+
+    class FailingAdapter(FakeAdapter):
+        async def resolve(self, _settings: Settings, _value: str) -> ResolvedAuthor:
+            raise TransientError("抖音接口被风控拦截：HTTP 403")
+
+    monkeypatch.setattr(commands, "detect", lambda _value: FailingAdapter())
+
+    with pytest.raises(FinishedException):
+        await commands.unsubscribe(make_event(), Mock(), args("https://v.douyin.com/x"))
+
+    assert FakeUniMessage.sent[0].startswith("取消失败：平台暂时拦截了请求")
+    assert FakeUniMessage.sent[0].endswith("错误码 E-DY-RISK")

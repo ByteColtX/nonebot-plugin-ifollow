@@ -32,6 +32,7 @@ from nonebot import logger
 from nonebot_plugin_alconna import UniMessage
 
 from .settings import Settings
+from .style import SEPARATOR
 
 IMAGE_BATCH_SIZE = 9
 """单条消息最多拼接的图片数量，超出拆成多条发送。"""
@@ -47,9 +48,6 @@ PROBE_SUFFIXES = VIDEO_SUFFIXES | {".gif"}
 
 PROBE_TIMEOUT_SECONDS = 10.0
 """单个体积探测请求的超时时间。"""
-
-SEPARATOR = "─" * 12
-"""文案里使用的分隔线，调用方拼订阅人提醒时也用它。"""
 
 _hub: Any | None = None
 _hub_lock = asyncio.Lock()
@@ -285,7 +283,7 @@ async def _probe_remote_size(client: httpx.AsyncClient, url: str) -> int | None:
             headers={"Accept-Encoding": "identity", "Range": "bytes=0-0"},
             follow_redirects=True,
         )
-    except httpx.HTTPError as exc:
+    except Exception as exc:
         logger.debug(f"媒体体积探测失败，改由下载后检查：{exc}")
         return None
     if response.status_code == 206:
@@ -385,20 +383,17 @@ def _base64_url(path: Path) -> str:
 
 async def media_messages(
     files: list[Any],
-    max_bytes: int,
+    policy: MediaPolicy,
     label: str,
     duration_unit: Literal["ms", "s"] = "s",
-    *,
-    base64_media: bool = False,
 ) -> MediaBundle:
     """把下载好的媒体拼成若干条消息：图片按批合并，视频单独发送。
 
     Args:
         files: parsehub 下载得到的媒体文件。
-        max_bytes: 单个媒体的体积上限，``0`` 表示不限制。
+        policy: 媒体处理策略（体积上限、数量上限、图片批次、传输方式）。
         label: 日志里使用的平台名。
         duration_unit: parsehub 返回的时长单位。
-        base64_media: 是否把媒体编码成 base64 发送。
 
     Returns:
         媒体消息与文案统计。
@@ -406,7 +401,7 @@ async def media_messages(
 
     images: list[Path] = []
     bundle = MediaBundle()
-    selected = files[:MAX_MEDIA_COUNT]
+    selected = files[: policy.max_count]
     paths = [Path(str(getattr(file, "path", ""))) for file in selected]
     live_paths = [
         Path(str(file.video_path))
@@ -417,11 +412,11 @@ async def media_messages(
 
     async def flush_images() -> None:
         while images:
-            batch = images[:IMAGE_BATCH_SIZE]
-            del images[:IMAGE_BATCH_SIZE]
+            batch = images[: policy.image_batch]
+            del images[: policy.image_batch]
             message = UniMessage()
             for path in batch:
-                message += await _segments_for(path, base64_media=base64_media)
+                message += await _segments_for(path, base64_media=policy.base64_media)
             bundle.messages.append(message)
 
     for file, path in zip(selected, paths):
@@ -429,9 +424,10 @@ async def media_messages(
         if size is None:
             logger.debug(f"{label}媒体文件不存在，已跳过：{path}")
             continue
-        if max_bytes and size > max_bytes:
+        if policy.max_bytes and size > policy.max_bytes:
             logger.warning(
-                f"{label}媒体 {path.name} 超过 {max_bytes // 1024 // 1024}MB，已跳过"
+                f"{label}媒体 {path.name} 超过 "
+                f"{policy.max_bytes // 1024 // 1024}MB，已跳过"
             )
             continue
 
@@ -445,21 +441,27 @@ async def media_messages(
         if video_path:
             await flush_images()
             live_path = Path(str(video_path))
-            bundle.messages.append(await _segments_for(path, base64_media=base64_media))
+            bundle.messages.append(
+                await _segments_for(path, base64_media=policy.base64_media)
+            )
             bundle.video_seconds += _duration_seconds(
                 getattr(file, "duration", 0), duration_unit
             )
             live_size = sizes.get(live_path)
-            if live_size is not None and (not max_bytes or live_size <= max_bytes):
+            if live_size is not None and (
+                not policy.max_bytes or live_size <= policy.max_bytes
+            ):
                 bundle.messages.append(
-                    await _segments_for(live_path, base64_media=base64_media)
+                    await _segments_for(live_path, base64_media=policy.base64_media)
                 )
                 bundle.total_bytes += live_size
             continue
 
         if path.suffix.lower() in VIDEO_SUFFIXES:
             await flush_images()
-            bundle.messages.append(await _segments_for(path, base64_media=base64_media))
+            bundle.messages.append(
+                await _segments_for(path, base64_media=policy.base64_media)
+            )
             bundle.video_seconds += _duration_seconds(
                 getattr(file, "duration", 0), duration_unit
             )
@@ -476,8 +478,7 @@ async def build_messages(
     meta: WorkMeta,
     *,
     label: str,
-    max_bytes: int,
-    base64_media: bool = False,
+    policy: MediaPolicy,
 ) -> list[UniMessage]:
     """把解析结果与下载结果拼成待发送的消息列表。
 
@@ -486,19 +487,14 @@ async def build_messages(
         download: parsehub 的下载结果。
         meta: 作者与发布时间。
         label: 日志里使用的平台名。
-        max_bytes: 单个媒体的体积上限。
-        base64_media: 是否把媒体编码成 base64 发送。
+        policy: 媒体处理策略。
 
     Returns:
         第一条是文案，其后是媒体消息。
     """
 
     bundle = await media_messages(
-        downloaded_files(download),
-        max_bytes,
-        label,
-        meta.duration_unit,
-        base64_media=base64_media,
+        downloaded_files(download), policy, label, meta.duration_unit
     )
     return [UniMessage(caption(meta, result, bundle)), *bundle.messages]
 
@@ -535,13 +531,6 @@ async def media_messages_for(
         if policy.max_bytes:
             await _drop_oversized_media(result, policy, label)
         download = await result.download(workdir)
-        yield await build_messages(
-            result,
-            download,
-            meta,
-            label=label,
-            max_bytes=policy.max_bytes,
-            base64_media=policy.base64_media,
-        )
+        yield await build_messages(result, download, meta, label=label, policy=policy)
     finally:
         await asyncio.to_thread(shutil.rmtree, workdir, ignore_errors=True)
