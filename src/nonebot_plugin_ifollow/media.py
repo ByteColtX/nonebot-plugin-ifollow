@@ -7,6 +7,9 @@
 只有协议端与插件不在同一台机器（它读不到本地路径）时，才开启 ``base64`` 传输，
 把媒体编码成 base64 消息段发送。
 
+视频类媒体在下载前会先探测远端体积，超过上限的直接不下载；探测失败或拿不到长度时，
+退回下载后的体积检查。
+
 parsehub 是同步库（内部用 requests），首次导入还要几秒（numpy/opencv），因此解析
 调用统一放进线程执行，``ParseHub`` 实例全局复用。
 """
@@ -24,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from nonebot import logger
 from nonebot_plugin_alconna import UniMessage
 
@@ -35,6 +39,12 @@ MAX_MEDIA_COUNT = 20
 
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".webm", ".flv", ".mkv"})
 """按后缀判断媒体是否为视频。"""
+
+PROBE_SUFFIXES = VIDEO_SUFFIXES | {".gif"}
+"""下载前探测体积的后缀：视频、动图，以及带 video_url 的实况照片。"""
+
+PROBE_TIMEOUT_SECONDS = 10.0
+"""单个体积探测请求的超时时间。"""
 
 SEPARATOR = "─" * 12
 """文案里使用的分隔线，调用方拼订阅人提醒时也用它。"""
@@ -208,6 +218,124 @@ def _file_sizes(paths: list[Path]) -> dict[Path, int]:
         except OSError:
             continue
     return sizes
+
+
+def _parse_int(value: str | None) -> int | None:
+    """把响应头里的数字解析成整数，解析不了返回 ``None``。"""
+
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _parse_content_range_total(value: str | None) -> int | None:
+    """从 ``bytes 0-0/12345`` 中取出媒体总长度。"""
+
+    if not value or "/" not in value:
+        return None
+    return _parse_int(value.rsplit("/", 1)[1])
+
+
+async def _probe_remote_size(client: httpx.AsyncClient, url: str) -> int | None:
+    """探测远端媒体体积：先 HEAD，拿不到长度时用 ``Range`` 回退。
+
+    Args:
+        client: 复用的 HTTP 客户端。
+        url: 媒体直链。
+
+    Returns:
+        媒体字节数；探测失败或服务端不返回长度时返回 ``None``。
+    """
+
+    try:
+        response = await client.head(
+            url,
+            headers={"Accept-Encoding": "identity"},
+            follow_redirects=True,
+        )
+        size = _parse_int(response.headers.get("content-length"))
+        if size:
+            return size
+        response = await client.get(
+            url,
+            headers={"Accept-Encoding": "identity", "Range": "bytes=0-0"},
+            follow_redirects=True,
+        )
+    except httpx.HTTPError as exc:
+        logger.debug(f"媒体体积探测失败，改由下载后检查：{exc}")
+        return None
+    if response.status_code == 206:
+        total = _parse_content_range_total(response.headers.get("content-range"))
+        if total:
+            return total
+    return _parse_int(response.headers.get("content-length"))
+
+
+def _needs_size_probe(ref: Any) -> bool:
+    """判断一个媒体引用是否值得在下载前探测体积。"""
+
+    ext = str(getattr(ref, "ext", "") or "").lstrip(".").lower()
+    if ext and f".{ext}" in PROBE_SUFFIXES:
+        return True
+    return bool(getattr(ref, "video_url", None))
+
+
+async def _keep_by_size(
+    client: httpx.AsyncClient, ref: Any, max_bytes: int, label: str
+) -> bool:
+    """探测一个媒体引用的体积，返回是否保留它。"""
+
+    urls = [getattr(ref, "url", None), getattr(ref, "video_url", None)]
+    for url in urls:
+        if not url:
+            continue
+        size = await _probe_remote_size(client, str(url))
+        if size is None:
+            continue
+        if max_bytes and size > max_bytes:
+            logger.warning(
+                f"{label}媒体（{getattr(ref, 'ext', '') or '未知'}）体积 "
+                f"{_format_size(size)} 超过上限 {_format_size(max_bytes)}，跳过下载"
+            )
+            return False
+    return True
+
+
+async def _drop_oversized_media(result: Any, max_bytes: int, label: str) -> None:
+    """下载前剔除超限的视频类媒体，避免白下载。
+
+    只探测视频、动图与实况照片；探测失败或拿不到长度时保留该媒体，由下载后的体积
+    检查兜底。
+
+    Args:
+        result: parsehub 的解析结果，会就地修改它的 ``media``。
+        max_bytes: 单个媒体的体积上限。
+        label: 日志里使用的平台名。
+    """
+
+    raw_media = getattr(result, "media", None)
+    if raw_media is None:
+        return
+    is_sequence = isinstance(raw_media, Sequence)
+    refs = list(raw_media) if is_sequence else [raw_media]
+    targets = [ref for ref in refs if _needs_size_probe(ref)]
+    if not targets:
+        return
+    async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+        keep = await asyncio.gather(
+            *(_keep_by_size(client, ref, max_bytes, label) for ref in targets)
+        )
+    dropped = {id(ref) for ref, kept in zip(targets, keep) if not kept}
+    if not dropped:
+        return
+    kept_refs = [ref for ref in refs if id(ref) not in dropped]
+    if is_sequence:
+        result.media = kept_refs or None
+    else:
+        result.media = kept_refs[0] if kept_refs else None
 
 
 async def _segments_for(path: Path, *, base64_media: bool) -> UniMessage:
@@ -385,6 +513,8 @@ async def media_messages_for(
     workdir = Path(tempfile.mkdtemp(prefix=temp_prefix))
     try:
         result = await parse_work(url, cookie)
+        if max_bytes:
+            await _drop_oversized_media(result, max_bytes, label)
         download = await result.download(workdir)
         yield await build_messages(
             result,
