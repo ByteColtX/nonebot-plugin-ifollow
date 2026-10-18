@@ -292,7 +292,7 @@ def _parse_dynamic_item(item: Any, mid: str) -> PlatformWork | None:
             kind="video",
         )
     opus = major.get("opus")
-    url = f"https://www.bilibili.com/dynamic/{dynamic_id}"
+    url = f"https://t.bilibili.com/{dynamic_id}"
     title = ""
     description = ""
     if isinstance(opus, dict):

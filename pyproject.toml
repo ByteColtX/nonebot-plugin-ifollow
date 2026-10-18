@@ -6,16 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "ByteColtX", email = "umk@live.com" }]
 dependencies = [
+  "bilibili-api-python>=17.4.2,<18.0.0",
   "gmssl>=3.2.2,<4.0.0",
   "httpx>=0.27.0,<1.0.0",
   "nonebot-adapter-onebot>=2.4.6,<3.0.0",
   "nonebot-plugin-alconna>=0.60.0,<1.0.0",
   "nonebot-plugin-apscheduler>=0.5.0,<1.0.0",
   "nonebot-plugin-localstore>=0.7.4,<1.0.0",
-  # B 站发送仍走 parser，抖音已改用 parsehub，待 B 站迁移完成后移除
-  "nonebot-plugin-parser>=2.6.8,<3.0.0",
-  "parsehub>=2.3.10,<3.0.0",
   "nonebot2>=2.5.0,<3.0.0",
+  "parsehub>=2.3.10,<3.0.0",
 ]
 
 [project.urls]

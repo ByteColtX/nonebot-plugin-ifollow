@@ -14,9 +14,8 @@ from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target, get_target
 from nonebot_plugin_apscheduler import scheduler
-from nonebot_plugin_parser.renders import get_renderer
 
-from .bilibili_parser import IFollowBilibiliParser
+from .bilibili_media import bilibili_media_messages
 from .bilibili_platform import (
     BilibiliRequestError,
     fetch_dynamic_works,
@@ -473,20 +472,12 @@ def _cursor_for_all_targets(author: AuthorSubscription, feed: str) -> str | None
 
 
 async def _send_work(url: str, platform: str, target: Target) -> None:
-    """解析并发送一个作品；抖音走 parsehub，B 站仍走 parser。"""
+    """解析并发送一个作品；抖音和 B 站都走 parsehub。"""
 
-    if platform == "douyin":
-        async with douyin_media_messages(url) as messages:
-            for message in messages:
-                await message.send(target=target)
-        return
-
-    parser = IFollowBilibiliParser()
-    keyword, searched = parser.search_url(url)
-    result = await parser.parse(keyword, searched)
-    renderer = get_renderer(result.platform.name)(result)
-    for message in [message async for message in renderer.render_messages()]:
-        await message.send(target=target)
+    factory = douyin_media_messages if platform == "douyin" else bilibili_media_messages
+    async with factory(url) as messages:
+        for message in messages:
+            await message.send(target=target)
 
 
 async def _notify_subscribers(target: Target, subscriber_ids: list[str]) -> None:
