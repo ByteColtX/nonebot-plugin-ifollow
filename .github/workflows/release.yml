@@ -37,11 +37,14 @@ jobs:
           uv publish
       - name: Ensure GitHub Release
         run: |
-          if ! gh release view "${{ steps.version.outputs.TAG_NAME }}" >/dev/null 2>&1; then
-            gh release create "${{ steps.version.outputs.TAG_NAME }}" \
-              --verify-tag \
-              --generate-notes \
-              --title "${{ steps.version.outputs.TAG_NAME }}"
+          TAG="${{ steps.version.outputs.TAG_NAME }}"
+          # Release Drafter 会为「下一个版本」预建草稿，标签正好撞上时草稿正文只有
+          # "No changes"；先删掉草稿再重建，才能拿到按提交生成的发布说明。
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+            gh release delete "$TAG" --yes --cleanup-tag=false
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
