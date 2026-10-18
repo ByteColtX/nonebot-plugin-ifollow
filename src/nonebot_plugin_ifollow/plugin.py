@@ -1,102 +1,61 @@
-"""爱播统一命令、轮询和消息发送。"""
+"""爱播统一命令和启动装配；轮询逻辑在 :mod:`polling`。"""
 
 from __future__ import annotations
 
-import asyncio
-import time
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 from nonebot import get_driver, logger, on_command
 from nonebot.adapters import Bot, Event, Message
 from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target, get_target
-from nonebot_plugin_apscheduler import scheduler
 
-from .bilibili_media import bilibili_media_messages
-from .bilibili_platform import (
-    BilibiliRequestError,
-    bilibili_dynamics_enabled,
-    fetch_dynamic_works,
-    fetch_video_works,
-    is_bilibili_value,
-    resolve_bilibili_author,
-    warm_up_bilibili,
-)
-from .bilibili_platform import (
-    fetch_author_profile as fetch_bilibili_profile,
-)
-from .config import config
-from .douyin_media import douyin_media_messages
-from .douyin_platform import (
-    DouyinRequestError,
-    fetch_latest_works,
-    resolve_sec_user_id,
-)
-from .douyin_platform import (
-    fetch_author_profile as fetch_douyin_profile,
-)
-from .media import SEPARATOR
+from .bilibili_platform import bilibili_dynamics_enabled, warm_up_bilibili
 from .models import (
     AuthorSubscription,
-    Platform,
+    Cursor,
     SubscriptionStore,
-    TargetSubscription,
     make_target_key,
 )
-from .platforms import AuthorInfo, PlatformWork
+from .polling import (
+    fetch_author_feeds,
+    platform_name,
+    resolve_author,
+    start,
+    status_text,
+    stop,
+)
 
 store = SubscriptionStore()
 driver = get_driver()
-poll_lock = asyncio.Lock()
-author_poll_states: dict[str, AuthorPollState] = {}
-send_retry_attempts: dict[tuple[str, str, str, str, str], int] = {}
-send_retry_until: dict[tuple[str, str, str, str, str], float] = {}
-permanent_target_warned: set[str] = set()
-"""已警告过不可用的目标，避免每个作者每轮都刷一条 warning。"""
-POLL_BACKOFF_BASE_SECONDS = 30.0
-POLL_BACKOFF_MAX_SECONDS = 300.0
-SEND_BACKOFF_BASE_SECONDS = 30.0
-SEND_BACKOFF_MAX_SECONDS = 300.0
-PERMANENT_TARGET_KEYWORDS = (
-    "被移出该群",
-    "重新加群",
-    "群不存在",
-    "不在该群",
-    "不在群里",
-    "群号不存在",
-    "not in group",
-    "group not found",
-)
-"""发送失败信息里表示目标群已不可用的关键字。"""
 HELP_MESSAGE = (
     "爱播帮助：\n"
     "爱播订阅 <抖音或 B 站作者主页/作品链接>\n"
     "爱播订阅列表（别名：爱播列表）\n"
     "爱播取消订阅 <序号或作者主页/作品链接>\n"
+    "爱播状态（超级用户，查看轮询健康度）\n"
     "也可引用包含链接的消息后发送 爱播订阅。\n"
     "支持抖音和 B 站；首次订阅不会补发历史内容。"
 )
 
 
-@dataclass
-class AuthorPollState:
-    """记录单个平台作者的轮询失败和下一次重试时间。"""
-
-    failure_count: int = 0
-    retry_at: float = 0.0
-
-
 @driver.on_startup
 async def load_subscriptions_on_startup() -> None:
-    """在 NoneBot 启动时加载订阅并输出统计信息。"""
+    """加载订阅、输出统计信息并启动轮询。"""
 
     await store.load()
     authors = await store.snapshot()
     target_count = sum(len(author.targets) for author in authors.values())
     logger.info(f"成功加载 {len(authors)} 个爱播作者订阅，覆盖 {target_count} 个会话。")
+    start(store)
+
+
+@driver.on_shutdown
+async def stop_polling_on_shutdown() -> None:
+    """停止轮询协程。"""
+
+    await stop()
 
 
 @driver.on_startup
@@ -133,7 +92,7 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     target_key = _target_key(target)
     subscriber_id = event.get_user_id()
     try:
-        platform, author = await _resolve_author(value)
+        platform, author = await resolve_author(value)
     except Exception as exc:
         logger.opt(exception=True).warning("爱播订阅解析失败")
         await UniMessage(f"订阅失败：{exc}").finish()
@@ -146,24 +105,26 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
             platform, author.author_id, target_key, subscriber_id
         ):
             await UniMessage(
-                f"已加入{_platform_name(platform)}作者 "
+                f"已加入{platform_name(platform)}作者 "
                 f"{existing_author.author_name} 的更新提醒。"
             ).send(target=target, bot=bot)
             return
         await UniMessage(
-            f"当前会话已订阅{_platform_name(platform)}作者 "
+            f"当前会话已订阅{platform_name(platform)}作者 "
             f"{existing_author.author_name}，无需重复订阅。"
         ).send(target=target, bot=bot)
         return
 
     try:
-        feeds = await _fetch_author_feeds(platform, author.author_id)
+        feeds = await fetch_author_feeds(platform, author.author_id)
     except Exception as exc:
         logger.opt(exception=True).warning("爱播订阅获取作品失败")
         await UniMessage(f"订阅失败：{exc}").finish()
 
-    cursors: dict[str, str | None] = {
-        feed: works[0].work_id for feed, works in feeds.items() if works
+    cursors: dict[str, Cursor] = {
+        feed: Cursor(works[0].work_id, works[0].create_time)
+        for feed, works in feeds.items()
+        if works
     }
     latest = max(
         (work for works in feeds.values() for work in works),
@@ -187,7 +148,7 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
         if await store.add_subscriber(
             platform, author.author_id, target_key, subscriber_id
         ):
-            await UniMessage(f"已加入{_platform_name(platform)}作者更新提醒。").send(
+            await UniMessage(f"已加入{platform_name(platform)}作者更新提醒。").send(
                 target=target, bot=bot
             )
             return
@@ -196,7 +157,7 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
         )
         return
     await UniMessage(
-        f"已订阅{_platform_name(platform)}作者 {author.name}。\n"
+        f"已订阅{platform_name(platform)}作者 {author.name}。\n"
         "首次订阅不会补发历史内容，有新作品或动态时会自动发送。"
     ).send(target=target, bot=bot)
 
@@ -228,7 +189,7 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         author_id = selected.author_id
     else:
         try:
-            platform, author = await _resolve_author(value)
+            platform, author = await resolve_author(value)
         except Exception as exc:
             await UniMessage(f"取消失败：{exc}").finish()
         author_id = author.author_id
@@ -262,7 +223,7 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
             handle = _format_handle(author)
             updated_at = _format_update_time(author.last_update_time)
             lines.append(
-                f"{index}. {_platform_name(author.platform)} {author.author_name}"
+                f"{index}. {platform_name(author.platform)} {author.author_name}"
                 f"（{handle}）{updated_at}"
             )
         message = "当前会话的爱播订阅：\n序号 平台 昵称（标识） 最近更新\n" + "\n".join(
@@ -271,314 +232,14 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
     await UniMessage(message).send(target=target, bot=bot)
 
 
-@scheduler.scheduled_job(
-    "interval",
-    seconds=config.ifollow_subscribe_interval,
-    id="nonebot-plugin-ifollow-poll",
-)
-async def poll_subscriptions() -> None:
-    """轮询所有平台作者并向订阅目标发送新内容。"""
+@on_command("爱播状态", priority=5, block=True).handle()
+async def status_command(event: Event, bot: Bot) -> None:
+    """显示轮询健康度，仅超级用户可用。"""
 
-    if poll_lock.locked():
-        logger.warning("上一次爱播订阅轮询尚未完成，本次跳过")
-        return
-    async with poll_lock:
-        authors = await store.snapshot()
-        active_author_ids = set(authors)
-        for author_key in set(author_poll_states) - active_author_ids:
-            author_poll_states.pop(author_key, None)
-        request_delay = max(
-            1.0, config.ifollow_subscribe_interval / max(len(authors), 1)
-        )
-        for index, author in enumerate(authors.values()):
-            state = author_poll_states.setdefault(author.key, AuthorPollState())
-            if time.monotonic() < state.retry_at:
-                continue
-            try:
-                await _poll_author(author)
-            except (DouyinRequestError, BilibiliRequestError) as exc:
-                attempt, delay = _record_author_failure(
-                    author.key, retryable=exc.retryable
-                )
-                logger.warning(
-                    f"{_platform_name(author.platform)}作者 {author.author_id} "
-                    f"轮询失败：{exc}；"
-                    f"第 {attempt} 次重试将在 {delay:.0f} 秒后进行"
-                )
-            except Exception:
-                attempt, delay = _record_author_failure(author.key)
-                logger.opt(exception=True).warning(
-                    f"{_platform_name(author.platform)}作者 {author.author_id} "
-                    "轮询失败；"
-                    f"第 {attempt} 次重试将在 {delay:.0f} 秒后进行"
-                )
-            else:
-                author_poll_states.pop(author.key, None)
-            if index < len(authors) - 1:
-                await asyncio.sleep(request_delay)
-
-
-async def _poll_author(author: AuthorSubscription) -> None:
-    """轮询单个作者的各个 feed。"""
-
-    feed_results: dict[str, list[PlatformWork]] = {}
-    errors: list[Exception] = []
-    for feed in _feeds_for_platform(author.platform):
-        cursor = _cursor_for_all_targets(author, feed)
-        try:
-            feed_results[feed] = await _fetch_feed(author, feed, cursor)
-        except (DouyinRequestError, BilibiliRequestError) as exc:
-            errors.append(exc)
-            logger.warning(
-                f"{_platform_name(author.platform)}作者 {author.author_id} "
-                f"{feed} feed 请求失败：{exc}"
-            )
-    if not feed_results and errors:
-        raise errors[0]
-    latest = max(
-        (work for works in feed_results.values() for work in works),
-        key=lambda work: (work.create_time, work.work_id),
-        default=None,
-    )
-    if latest:
-        await store.update_author_metadata(
-            author.platform,
-            author.author_id,
-            latest.author.name,
-            latest.author.handle,
-            latest.create_time,
-        )
-    video_bvids = {work.bvid for work in feed_results.get("video", []) if work.bvid}
-    dedupe_bvids = {target_key: set(video_bvids) for target_key in author.targets}
-    for feed in _feeds_for_platform(author.platform):
-        works = feed_results.get(feed)
-        if works is None:
-            continue
-        for target_key, target_state in author.targets.items():
-            await _deliver_new_works(
-                author,
-                target_key,
-                target_state,
-                feed,
-                works,
-                dedupe_bvids[target_key],
-            )
-    if errors and not feed_results:
-        raise errors[0]
-
-
-async def _deliver_new_works(
-    author: AuthorSubscription,
-    target_key: str,
-    target_state: TargetSubscription,
-    feed: str,
-    works: list[PlatformWork],
-    sent_bvids: set[str],
-) -> None:
-    """发送一个 feed 中的新内容，并在成功后推进游标。"""
-
-    if not works:
-        return
-    cursor = target_state.cursors.get(feed)
-    if cursor is None:
-        await store.update_cursor(
-            author.platform, author.author_id, target_key, feed, works[0].work_id
-        )
-        return
-    unseen: list[PlatformWork] = []
-    for work in works:
-        if work.work_id == cursor:
-            break
-        unseen.append(work)
-    target = Target.load(target_state.target.copy())
-    for work in reversed(unseen):
-        retry_key = (
-            author.platform,
-            author.author_id,
-            target_key,
-            feed,
-            work.work_id,
-        )
-        if time.monotonic() < send_retry_until.get(retry_key, 0.0):
-            return
-        if feed == "dynamic" and work.bvid and work.bvid in sent_bvids:
-            await store.update_cursor(
-                author.platform, author.author_id, target_key, feed, work.work_id
-            )
-            continue
-        try:
-            await _send_work(work, target, target_state.subscriber_ids)
-        except Exception as exc:
-            if _is_permanent_target_error(exc):
-                send_retry_attempts.pop(retry_key, None)
-                send_retry_until.pop(retry_key, None)
-                if target.id in permanent_target_warned:
-                    logger.debug(f"目标 {target.id} 仍不可用，跳过")
-                else:
-                    permanent_target_warned.add(target.id)
-                    logger.warning(
-                        f"目标 {target.id} 已不可用（{exc}），本轮跳过该目标且不重试；"
-                        "如果确实不在该群了，可以取消对应订阅"
-                    )
-                return
-            attempt = send_retry_attempts.get(retry_key, 0) + 1
-            send_retry_attempts[retry_key] = attempt
-            delay = _exponential_backoff_seconds(
-                attempt,
-                base_seconds=SEND_BACKOFF_BASE_SECONDS,
-                max_seconds=SEND_BACKOFF_MAX_SECONDS,
-            )
-            send_retry_until[retry_key] = time.monotonic() + delay
-            logger.opt(exception=True).warning(
-                f"向目标 {target.id} 发送{_platform_name(work.platform)}内容 "
-                f"{work.work_id} 失败，第 {attempt} 次重试将在 {delay:.0f} 秒后进行"
-            )
-            return
-        send_retry_attempts.pop(retry_key, None)
-        send_retry_until.pop(retry_key, None)
-        permanent_target_warned.discard(target.id)
-        if work.bvid:
-            sent_bvids.add(work.bvid)
-        await store.update_cursor(
-            author.platform, author.author_id, target_key, feed, work.work_id
-        )
-
-
-async def _resolve_author(value: str) -> tuple[Platform, AuthorInfo]:
-    """按链接识别平台并解析作者。"""
-
-    if is_bilibili_value(value) or value.strip().isdigit():
-        if value.strip().isdigit():
-            return "bilibili", await fetch_bilibili_profile(value.strip())
-        return "bilibili", await resolve_bilibili_author(value)
-    sec_user_id = await resolve_sec_user_id(value)
-    works = await fetch_latest_works(sec_user_id)
-    if works:
-        return "douyin", works[0].author
-    name, handle = await fetch_douyin_profile(sec_user_id)
-    return "douyin", AuthorInfo(sec_user_id, name or sec_user_id, handle)
-
-
-async def _fetch_author_feeds(
-    platform: Platform, author_id: str
-) -> dict[str, list[PlatformWork]]:
-    feeds: dict[str, list[PlatformWork]] = {}
-    for feed in _feeds_for_platform(platform):
-        feeds[feed] = await _fetch_feed(platform, author_id, feed, None)
-    return feeds
-
-
-async def _fetch_feed(
-    author_or_platform: AuthorSubscription | Platform,
-    feed_or_author_id: str,
-    cursor_or_feed: str | None,
-    maybe_cursor: str | None = None,
-) -> list[PlatformWork]:
-    """统一调用平台 feed，兼容作者对象和显式参数。"""
-
-    if isinstance(author_or_platform, AuthorSubscription):
-        platform = author_or_platform.platform
-        author_id = author_or_platform.author_id
-        feed = feed_or_author_id
-        cursor = cursor_or_feed
-    else:
-        platform = author_or_platform
-        author_id = feed_or_author_id
-        feed = cast(str, cursor_or_feed)
-        cursor = maybe_cursor
-    if platform == "douyin":
-        if feed != "video":
-            return []
-        return await fetch_latest_works(author_id)
-    if feed == "video":
-        return await fetch_video_works(author_id, cursor)
-    if feed == "dynamic":
-        return await fetch_dynamic_works(author_id, cursor)
-    return []
-
-
-def _feeds_for_platform(platform: Platform) -> tuple[str, ...]:
-    if platform == "douyin":
-        return ("video",)
-    if bilibili_dynamics_enabled():
-        return ("video", "dynamic")
-    return ("video",)
-
-
-def _cursor_for_all_targets(author: AuthorSubscription, feed: str) -> str | None:
-    """返回作者当前 feed 的最早游标，用于有限追赶分页。"""
-
-    cursors: list[str] = []
-    for target in author.targets.values():
-        cursor = target.cursors.get(feed)
-        if cursor:
-            cursors.append(cursor)
-    return cursors[0] if cursors else None
-
-
-async def _send_work(
-    work: PlatformWork, target: Target, subscriber_ids: list[str]
-) -> None:
-    """解析并发送一个作品；抖音和 B 站都走 parsehub。
-
-    订阅人提醒合并到文案末尾，避免每个作品多发一条消息。
-    """
-
-    factory = (
-        douyin_media_messages if work.platform == "douyin" else bilibili_media_messages
-    )
-    async with factory(work) as messages:
-        if messages and subscriber_ids:
-            footer = UniMessage(f"\n{SEPARATOR}\n")
-            for index, subscriber_id in enumerate(subscriber_ids):
-                if index:
-                    footer += " "
-                footer += UniMessage.at(subscriber_id)
-            messages[0] += footer
-        for message in messages:
-            await message.send(target=target)
-
-
-def _is_permanent_target_error(exc: BaseException) -> bool:
-    """判断发送失败是否因为目标群已不可用（机器人被踢、群解散）。
-
-    Args:
-        exc: 发送时抛出的异常。
-
-    Returns:
-        目标群已不可用时返回 True，此时重试没有意义。
-    """
-
-    info = getattr(exc, "info", None)
-    if isinstance(info, dict):
-        text = " ".join(str(info.get(key) or "") for key in ("message", "wording"))
-    else:
-        text = str(exc)
-    lowered = text.lower()
-    return any(keyword in lowered for keyword in PERMANENT_TARGET_KEYWORDS)
-
-
-def _record_author_failure(
-    author_key: str, *, retryable: bool = True
-) -> tuple[int, float]:
-    state = author_poll_states.setdefault(author_key, AuthorPollState())
-    state.failure_count += 1
-    if retryable:
-        delay = _exponential_backoff_seconds(
-            state.failure_count,
-            base_seconds=POLL_BACKOFF_BASE_SECONDS,
-            max_seconds=POLL_BACKOFF_MAX_SECONDS,
-        )
-    else:
-        delay = max(config.ifollow_subscribe_interval, POLL_BACKOFF_MAX_SECONDS)
-    state.retry_at = time.monotonic() + delay
-    return state.failure_count, delay
-
-
-def _exponential_backoff_seconds(
-    attempt: int, *, base_seconds: float, max_seconds: float
-) -> float:
-    return min(base_seconds * (2 ** max(attempt - 1, 0)), max_seconds)
+    if event.get_user_id() not in get_driver().config.superusers:
+        await UniMessage("仅超级用户可以使用 爱播状态。").finish()
+    authors = await store.snapshot()
+    await UniMessage(status_text(authors)).send(target=get_target(event, bot), bot=bot)
 
 
 def _target_key(target: Target) -> str:
@@ -591,10 +252,6 @@ def _target_subscriptions(
     """返回当前会话的订阅，顺序与订阅列表命令一致。"""
 
     return [author for author in authors.values() if target_key in author.targets]
-
-
-def _platform_name(platform: str) -> str:
-    return "抖音" if platform == "douyin" else "B站"
 
 
 def _format_handle(author: AuthorSubscription) -> str:

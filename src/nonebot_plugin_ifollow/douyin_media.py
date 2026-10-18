@@ -41,5 +41,6 @@ async def douyin_media_messages(work: PlatformWork) -> AsyncIterator[list[UniMes
         label="抖音",
         temp_prefix="ifollow-douyin-",
         max_bytes=config.ifollow_media_max_mb * 1024 * 1024,
+        base64_media=config.ifollow_use_base64,
     ) as messages:
         yield messages

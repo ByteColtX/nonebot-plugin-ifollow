@@ -3,6 +3,7 @@ from typing import Any, cast
 import pytest
 
 from nonebot_plugin_ifollow import douyin_platform as douyin
+from nonebot_plugin_ifollow.platforms import Cursor
 
 
 def test_extract_sec_user_id() -> None:
@@ -222,3 +223,74 @@ async def test_fetch_author_profile_reads_nickname_and_handle(client: Any) -> No
     nickname, handle = await douyin.fetch_author_profile("MS4wLjABAAAA-test")
 
     assert (nickname, handle) == ("作者", "deagle")
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
+    """停机久了要按页补齐，直到翻到游标作品。"""
+
+    created = client(
+        [
+            FakeResponse(
+                data={
+                    "status_code": 0,
+                    "has_more": True,
+                    "max_cursor": "50",
+                    "aweme_list": [
+                        {
+                            "aweme_id": "103",
+                            "create_time": 30,
+                            "author": {"nickname": "作者"},
+                        }
+                    ],
+                }
+            ),
+            FakeResponse(
+                data={
+                    "status_code": 0,
+                    "has_more": False,
+                    "aweme_list": [
+                        {
+                            "aweme_id": "100",
+                            "create_time": 10,
+                            "author": {"nickname": "作者"},
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+
+    works = await douyin.fetch_latest_works("MS4wLjABAAAA-test", Cursor("100", 10))
+
+    assert [work.work_id for work in works] == ["103", "100"]
+    assert len(created[0].calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_works_without_cursor_requests_one_page(
+    client: Any,
+) -> None:
+    created = client(
+        [
+            FakeResponse(
+                data={
+                    "status_code": 0,
+                    "has_more": True,
+                    "max_cursor": "50",
+                    "aweme_list": [
+                        {
+                            "aweme_id": "103",
+                            "create_time": 30,
+                            "author": {"nickname": "作者"},
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+
+    works = await douyin.fetch_latest_works("MS4wLjABAAAA-test")
+
+    assert [work.work_id for work in works] == ["103"]
+    assert len(created[0].calls) == 1

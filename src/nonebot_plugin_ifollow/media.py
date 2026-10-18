@@ -3,8 +3,9 @@
 `parsehub <https://github.com/z-mio/ParseHub>`_ 负责解析作品详情并下载媒体，
 本模块只做「解析 → 下载 → 拼成 ``UniMessage``」三件事，渲染与发送交给 alconna。
 
-QQ 协议端通常跑在另一台机器上，``file://`` 路径它读不到（会报「路径不存在」），
-所以媒体统一读成字节以 base64 消息段发送，不依赖两边共享文件系统。
+默认把媒体的本地路径交给协议端（``file://``），不读字节也不编码，事件循环没有负担。
+只有协议端与插件不在同一台机器（它读不到本地路径）时，才开启 ``base64`` 传输，
+把媒体编码成 base64 消息段发送。
 
 parsehub 是同步库（内部用 requests），首次导入还要几秒（numpy/opencv），因此解析
 调用统一放进线程执行，``ParseHub`` 实例全局复用。
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+from base64 import b64encode
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -208,20 +210,28 @@ def _file_sizes(paths: list[Path]) -> dict[Path, int]:
     return sizes
 
 
-async def _segments_for(path: Path) -> UniMessage:
-    """把本地媒体读成字节，再包装成图片或视频消息段。
+async def _segments_for(path: Path, *, base64_media: bool) -> UniMessage:
+    """把本地媒体包装成图片或视频消息段。
 
     Args:
         path: 本地媒体文件。
+        base64_media: 是否编码成 base64；默认直接把路径交给协议端。
 
     Returns:
-        图片或视频消息段（内容为 base64）。
+        图片或视频消息段。
     """
 
-    raw = await asyncio.to_thread(path.read_bytes)
-    if path.suffix.lower() in VIDEO_SUFFIXES:
-        return UniMessage.video(raw=raw)
-    return UniMessage.image(raw=raw)
+    is_video = path.suffix.lower() in VIDEO_SUFFIXES
+    if base64_media:
+        url = await asyncio.to_thread(_base64_url, path)
+        return UniMessage.video(url=url) if is_video else UniMessage.image(url=url)
+    return UniMessage.video(path=path) if is_video else UniMessage.image(path=path)
+
+
+def _base64_url(path: Path) -> str:
+    """在线程里读文件并编码，避免大文件阻塞事件循环。"""
+
+    return f"base64://{b64encode(path.read_bytes()).decode()}"
 
 
 async def media_messages(
@@ -229,6 +239,8 @@ async def media_messages(
     max_bytes: int,
     label: str,
     duration_unit: Literal["ms", "s"] = "s",
+    *,
+    base64_media: bool = False,
 ) -> MediaBundle:
     """把下载好的媒体拼成若干条消息：图片按批合并，视频单独发送。
 
@@ -237,6 +249,7 @@ async def media_messages(
         max_bytes: 单个媒体的体积上限，``0`` 表示不限制。
         label: 日志里使用的平台名。
         duration_unit: parsehub 返回的时长单位。
+        base64_media: 是否把媒体编码成 base64 发送。
 
     Returns:
         媒体消息与文案统计。
@@ -259,7 +272,7 @@ async def media_messages(
             del images[:IMAGE_BATCH_SIZE]
             message = UniMessage()
             for path in batch:
-                message += await _segments_for(path)
+                message += await _segments_for(path, base64_media=base64_media)
             bundle.messages.append(message)
 
     for file, path in zip(selected, paths):
@@ -283,19 +296,21 @@ async def media_messages(
         if video_path:
             await flush_images()
             live_path = Path(str(video_path))
-            bundle.messages.append(await _segments_for(path))
+            bundle.messages.append(await _segments_for(path, base64_media=base64_media))
             bundle.video_seconds += _duration_seconds(
                 getattr(file, "duration", 0), duration_unit
             )
             live_size = sizes.get(live_path)
             if live_size is not None and (not max_bytes or live_size <= max_bytes):
-                bundle.messages.append(await _segments_for(live_path))
+                bundle.messages.append(
+                    await _segments_for(live_path, base64_media=base64_media)
+                )
                 bundle.total_bytes += live_size
             continue
 
         if path.suffix.lower() in VIDEO_SUFFIXES:
             await flush_images()
-            bundle.messages.append(await _segments_for(path))
+            bundle.messages.append(await _segments_for(path, base64_media=base64_media))
             bundle.video_seconds += _duration_seconds(
                 getattr(file, "duration", 0), duration_unit
             )
@@ -313,6 +328,7 @@ async def build_messages(
     *,
     label: str,
     max_bytes: int,
+    base64_media: bool = False,
 ) -> list[UniMessage]:
     """把解析结果与下载结果拼成待发送的消息列表。
 
@@ -322,13 +338,18 @@ async def build_messages(
         meta: 作者与发布时间。
         label: 日志里使用的平台名。
         max_bytes: 单个媒体的体积上限。
+        base64_media: 是否把媒体编码成 base64 发送。
 
     Returns:
         第一条是文案，其后是媒体消息。
     """
 
     bundle = await media_messages(
-        downloaded_files(download), max_bytes, label, meta.duration_unit
+        downloaded_files(download),
+        max_bytes,
+        label,
+        meta.duration_unit,
+        base64_media=base64_media,
     )
     return [UniMessage(caption(meta, result, bundle)), *bundle.messages]
 
@@ -342,6 +363,7 @@ async def media_messages_for(
     label: str,
     temp_prefix: str,
     max_bytes: int,
+    base64_media: bool = False,
 ) -> AsyncIterator[list[UniMessage]]:
     """解析并下载一个作品，产出待发送的消息列表。
 
@@ -354,6 +376,7 @@ async def media_messages_for(
         label: 日志里使用的平台名。
         temp_prefix: 临时目录前缀。
         max_bytes: 单个媒体的体积上限，``0`` 表示不限制。
+        base64_media: 是否把媒体编码成 base64 发送。
 
     Yields:
         消息列表，第一条是文案，其后是媒体。
@@ -364,7 +387,12 @@ async def media_messages_for(
         result = await parse_work(url, cookie)
         download = await result.download(workdir)
         yield await build_messages(
-            result, download, meta, label=label, max_bytes=max_bytes
+            result,
+            download,
+            meta,
+            label=label,
+            max_bytes=max_bytes,
+            base64_media=base64_media,
         )
     finally:
         await asyncio.to_thread(shutil.rmtree, workdir, ignore_errors=True)
