@@ -99,7 +99,7 @@
 | `IFOLLOW_SUBSCRIBE_COUNT` | 否 | `20` | 每个平台每次拉取的最新内容数，范围 1-50 |
 | `IFOLLOW_MEDIA_MAX_MB` | 否 | `90` | 单个媒体文件的体积上限（抖音、B 站），超出则跳过该媒体 |
 | `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，通常无需填写，详见下方说明 |
-| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie，动态解析和接口受限时填写；视频固定 720p |
+| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie（SESSDATA）；配置后才会轮询动态，视频固定 720p |
 
 示例：
 
@@ -127,14 +127,30 @@ IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 `-H 'Cookie: ...'` 的整段值填入配置即可。`document.cookie` 拿不到 HttpOnly 的 `ttwid`/`UIFID`，
 不要用它。
 
-### 关于 B 站 Cookie 与画质
+### 关于 B 站接口、Cookie 与画质
 
-B 站发送由 parsehub 完成，视频接口固定按 720p（`qn=64`）取流，配置 Cookie 不会提升画质。
-`IFOLLOW_BILIBILI_COOKIE` 主要用于动态解析和接口受限时的兜底：动态在匿名态容易触发 `-352` 风控。
-在浏览器登录 B 站，按 `F12` → **Application → Cookies → https://www.bilibili.com** 复制
-`SESSDATA` 即可。Cookie 等同于账号控制权，建议使用小号，不要提交到代码仓库。
+B 站作者资料和视频投稿走 APP 端接口（只校验 `appkey + sign`），匿名即可稳定获取，不需要 Cookie；
+APP 接口失败时会回退网页接口。动态没有对应的 APP 接口，匿名态容易触发 `-352` 风控，因此
+**只有配置了 `IFOLLOW_BILIBILI_COOKIE` 才会轮询动态**；未配置时只推送视频。
 
+视频发送由 parsehub 完成，接口固定按 720p（`qn=64`）取流，配置 Cookie 不会提升画质。
 动态链接会以 `t.bilibili.com/{id}` 的形式发送，parsehub 只识别这种动态链接。
+
+`buvid3` / `buvid4` 无需手动填写：配置 Cookie 后插件会在启动时自动获取，网页兜底请求也会自动补充。
+
+需要动态推送时，按下面任一方式获取 Cookie：
+
+1. 匿名指纹（不登录，只提升网页接口成功率）：请求 `https://api.bilibili.com/x/frontend/finger/spi`，
+   把返回的 `b_3`、`b_4` 拼成 `buvid3=...; buvid4=...`。
+2. 登录 Cookie（动态最稳）：浏览器登录 `https://www.bilibili.com`，按 F12 打开开发者工具，
+   在“应用/存储 → Cookie → https://www.bilibili.com”中复制 `SESSDATA`；也可以在“网络”面板
+   任意请求的请求头中复制整段 `Cookie`。
+
+```dotenv
+IFOLLOW_BILIBILI_COOKIE="SESSDATA=...; buvid3=...; buvid4=..."
+```
+
+Cookie 等同于账号控制权，建议使用小号，不要提交到代码仓库；退出登录或修改密码后 Cookie 会失效。
 
 ## 🎉 使用
 

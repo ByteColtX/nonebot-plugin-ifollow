@@ -259,3 +259,44 @@ async def test_send_work_dispatches_to_platform_media(
     await plugin._send_work(url, platform, target)
 
     assert calls == [(url, target)]
+
+
+def test_feeds_skip_dynamics_without_bilibili_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plugin, "bilibili_dynamics_enabled", lambda: False)
+    assert plugin._feeds_for_platform("bilibili") == ("video",)
+
+    monkeypatch.setattr(plugin, "bilibili_dynamics_enabled", lambda: True)
+    assert plugin._feeds_for_platform("bilibili") == ("video", "dynamic")
+
+
+@pytest.mark.asyncio
+async def test_warm_up_on_startup_only_with_bilibili_authors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SubscriptionStore(tmp_path)
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    calls: list[bool] = []
+
+    async def fake_warm_up() -> None:
+        calls.append(True)
+
+    monkeypatch.setattr(plugin, "store", store)
+    monkeypatch.setattr(plugin, "warm_up_bilibili", fake_warm_up)
+    monkeypatch.setattr(plugin, "logger", Mock())
+    monkeypatch.setattr(plugin, "bilibili_dynamics_enabled", lambda: False)
+
+    await plugin.warm_up_bilibili_on_startup()
+    assert calls == []
+
+    await store.upsert_target(
+        "bilibili", "2", "作者", target_key, target.dump(), {"video": "old"}
+    )
+    await plugin.warm_up_bilibili_on_startup()
+    assert calls == []
+
+    monkeypatch.setattr(plugin, "bilibili_dynamics_enabled", lambda: True)
+    await plugin.warm_up_bilibili_on_startup()
+    assert calls == [True]
