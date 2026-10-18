@@ -7,8 +7,9 @@ from typing import Any, ClassVar
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from nonebot.adapters.onebot.v11 import Message
 from nonebot.exception import FinishedException
-from nonebot_plugin_alconna.uniseg import Reply, Target
+from nonebot_plugin_alconna.uniseg import Target
 
 from nonebot_plugin_ifollow import app, commands
 from nonebot_plugin_ifollow.models import (
@@ -395,19 +396,14 @@ async def test_unsubscribe_superuser_cancels_legacy_entry(env: Any) -> None:
     assert await store.snapshot() == {}
 
 
-class FakeBot:
-    """只实现 get_msg 的 bot，用来喂被引用的消息正文。"""
+class FakeReply:
+    """只带 message 字段的引用消息，和 OneBot 的 Reply 一致。"""
 
     def __init__(self, text: str) -> None:
-        self.text = text
-
-    async def call_api(self, api: str, **kwargs: Any) -> dict[str, Any]:
-        assert api == "get_msg"
-        return {"message": self.text}
+        self.message = Message(text)
 
 
-@pytest.mark.asyncio
-async def test_quoted_author_parses_notice() -> None:
+def test_quoted_author_parses_notice() -> None:
     """引用通知时能从首行认出平台和作者。"""
 
     text = (
@@ -419,18 +415,14 @@ async def test_quoted_author_parses_notice() -> None:
         "2026-10-19 01:39"
     )
 
-    assert await commands.quoted_author(Reply("123"), FakeBot(text)) == (
-        "抖音",
-        "01年的小女孩",
-    )
+    assert commands.quoted_author(FakeReply(text)) == ("抖音", "01年的小女孩")
 
 
-@pytest.mark.asyncio
-async def test_quoted_author_returns_none_for_other_text() -> None:
+def test_quoted_author_returns_none_for_other_text() -> None:
     """引用的不是爱播通知时认不出来。"""
 
-    assert await commands.quoted_author(Reply("123"), FakeBot("随便聊两句")) is None
-    assert await commands.quoted_author(None, FakeBot("随便聊两句")) is None
+    assert commands.quoted_author(FakeReply("随便聊两句")) is None
+    assert commands.quoted_author(None) is None
 
 
 @pytest.mark.asyncio
@@ -440,11 +432,9 @@ async def test_unsubscribe_from_quoted_notice(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)  # 订阅人是 42
     event = make_event(user_id="42")
-    event.reply = Reply("123")
+    event.reply = FakeReply("抖音 · 作者 发布了新作品\n────")
 
-    await commands.unsubscribe(
-        event, FakeBot("抖音 · 作者 发布了新作品\n────"), args("")
-    )
+    await commands.unsubscribe(event, Mock(), args(""))
 
     assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
     assert await store.snapshot() == {}
@@ -457,12 +447,10 @@ async def test_unsubscribe_from_quoted_notice_unknown_author(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)
     event = make_event(user_id="42")
-    event.reply = Reply("123")
+    event.reply = FakeReply("抖音 · 别人 发布了新作品\n────")
 
     with pytest.raises(FinishedException):
-        await commands.unsubscribe(
-            event, FakeBot("抖音 · 别人 发布了新作品\n────"), args("")
-        )
+        await commands.unsubscribe(event, Mock(), args(""))
 
     assert "「别人」当前没有订阅" in FakeUniMessage.sent[0]
     assert len(await store.snapshot()) == 1

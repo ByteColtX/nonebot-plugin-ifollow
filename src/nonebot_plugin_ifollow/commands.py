@@ -151,32 +151,23 @@ def _text_of(msg: Any) -> str:
     return extract() if callable(extract) else str(msg)
 
 
-async def _reply_text(reply: Any, bot: Bot) -> str:
+def _reply_text(reply: Any) -> str:
     """取出被引用消息的纯文本。
 
-    alconna 把 ``event.reply`` 包成 uniseg 的 ``Reply``，OneBot 的 reply 段里
-    只有消息 ID，正文要回查 ``get_msg``。
+    OneBot v11 的 ``event.reply`` 是 nonebot 自己的 ``Reply``，被引用消息的
+    正文就在 ``message`` 字段里，不需要回查 ``get_msg``。
 
     Args:
         reply: 被引用的消息。
-        bot: 当前 bot。
 
     Returns:
-        纯文本；回查失败时返回空串并记一条 warning。
+        纯文本；没有引用时返回空串。
     """
 
-    message_id = getattr(reply, "id", None)
-    if not message_id:
-        return ""
-    try:
-        fetched = await bot.call_api("get_msg", message_id=int(message_id))
-    except Exception as exc:  # 协议端不支持或消息已过期
-        logger.warning(f"回查被引用消息失败：{message_id} {type(exc).__name__}: {exc}")
-        return ""
-    return _text_of(fetched.get("message") or fetched.get("raw_message"))
+    return _text_of(getattr(reply, "message", None))
 
 
-async def quoted_author(reply: Any, bot: Bot) -> tuple[str, str] | None:
+def quoted_author(reply: Any) -> tuple[str, str] | None:
     """从引用的爱播通知里认出作者。
 
     通知首行形如 ``抖音 · 作者 发布了新作品``；逐行找这个后缀，所以正文里
@@ -184,14 +175,13 @@ async def quoted_author(reply: Any, bot: Bot) -> tuple[str, str] | None:
 
     Args:
         reply: 被引用的消息。
-        bot: 当前 bot，用于回查被引用的消息。
 
     Returns:
         ``(平台名, 作者名)``；平台名可能是空串（通知没带平台）。认不出时返回
         ``None``。
     """
 
-    text = await _reply_text(reply, bot)
+    text = _reply_text(reply)
     for line in text.splitlines():
         line = line.strip()
         if not line.endswith(_NOTICE_SUFFIX):
@@ -217,9 +207,7 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
 
     context = runtime()
     value = args.extract_plain_text().strip()
-    quoted = (
-        await quoted_author(getattr(event, "reply", None), bot) if not value else None
-    )
+    quoted = quoted_author(getattr(event, "reply", None)) if not value else None
     if not value and quoted is None:
         await UniMessage(
             "用法：爱播取消订阅 <序号、作者 ID、昵称或链接>\n"
