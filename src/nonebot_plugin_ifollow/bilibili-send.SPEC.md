@@ -34,10 +34,16 @@ parsehub 解析 → 下载媒体到临时目录 → 拼成「文案 + 媒体」�
 - **`bilibili-api-python` 保留为直接依赖**：动态列表和网页兜底仍用 `Credential` / `User` / `Video`，
   移除 parser 后必须显式声明。
 - **不在媒体层吞异常**：解析或下载失败直接抛出，交给现有的发送重试和游标保留逻辑。
+- **媒体以 base64 消息段发送**：QQ 协议端常常跑在另一台机器上，`file://` 路径会被拒
+  （`retcode=1200 路径不存在`）。`media.py` 把媒体读成字节后交给 `UniMessage.video(raw=...)` /
+  `image(raw=...)`，适配器导出成 `base64://`，不依赖两边共享文件系统。代价是大文件会把
+  base64 内容塞进一条 WS 消息，`IFOLLOW_MEDIA_MAX_MB` 需要按协议端的承受能力调低。
 
 ## 已知限制
 
 - B 站视频固定 720p；需要 1080p 时要另做 bilibili-api + ffmpeg 下载链路。
+- base64 会把体积放大 1/3，几十 MB 的视频可能被协议端拒收；日志里出现发送失败时优先调低
+  `IFOLLOW_MEDIA_MAX_MB`，而不是加大重试。
 - 动态解析在匿名态容易触发 `-352` 风控，建议配置 `IFOLLOW_BILIBILI_COOKIE`。
 - parsehub 是同步库，解析调用在线程中执行，首次导入有数秒延迟。
 - 动态解析依赖 `t.bilibili.com` 链接形式；旧格式链接需要先改写。
