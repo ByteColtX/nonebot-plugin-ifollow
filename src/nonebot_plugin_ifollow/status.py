@@ -11,7 +11,7 @@ from typing import Protocol
 from .failures import WORK_RETRY_LIMIT
 from .models import AuthorSubscription
 from .settings import Settings
-from .style import SEPARATOR
+from .style import SEPARATOR, platform_name
 
 
 @dataclass
@@ -44,12 +44,6 @@ class StateLike(Protocol):
     last_error: str
     next_poll_at: float
     disabled: bool
-
-
-def platform_name(platform: str) -> str:
-    """返回平台中文名。"""
-
-    return "抖音" if platform == "douyin" else "B站"
 
 
 def format_age(seconds: float) -> str:

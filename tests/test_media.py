@@ -8,7 +8,12 @@ import pytest
 from nonebot_plugin_ifollow import media
 
 CREATE_TIME = 1791073726
-META = media.WorkMeta(author_name="呆呆丸", create_time=CREATE_TIME, duration_unit="ms")
+META = media.WorkMeta(
+    author_name="呆呆丸",
+    create_time=CREATE_TIME,
+    duration_unit="ms",
+    platform_name="抖音",
+)
 
 
 def make_file(path: Path, **extra: Any) -> SimpleNamespace:
@@ -38,7 +43,7 @@ def test_caption_renders_full_block() -> None:
     )
 
     assert media.caption(META, result, bundle) == (
-        "呆呆丸 发布了新作品\n"
+        "抖音 · 呆呆丸 发布了新作品\n"
         f"{media.SEPARATOR}\n"
         "作品标题\n"
         "\n"
@@ -173,7 +178,7 @@ async def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
     assert (
         messages[0]
         .extract_plain_text()
-        .startswith(f"呆呆丸 发布了新作品\n{media.SEPARATOR}\n标题")
+        .startswith(f"抖音 · 呆呆丸 发布了新作品\n{media.SEPARATOR}\n标题")
     )
     assert [segment.type for segment in messages[1]] == ["image"]
 
@@ -344,7 +349,7 @@ async def test_media_messages_for_skips_download_when_everything_is_too_big(
         label="抖音",
         temp_prefix="ifollow-test-",
     ) as messages:
-        assert messages[0].extract_plain_text().startswith("呆呆丸 发布了新作品")
+        assert messages[0].extract_plain_text().startswith("抖音 · 呆呆丸 发布了新作品")
 
     assert media_at_download == [None]
 

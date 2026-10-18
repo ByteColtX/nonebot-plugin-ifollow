@@ -80,11 +80,13 @@ class WorkMeta:
         author_name: 作者昵称。
         create_time: 发布时间，Unix 秒。
         duration_unit: parsehub 返回的时长单位，抖音是毫秒、B 站是秒。
+        platform_name: 平台中文名，为空时文案不带头部前缀。
     """
 
     author_name: str
     create_time: int
     duration_unit: Literal["ms", "s"] = "s"
+    platform_name: str = ""
 
 
 @dataclass
@@ -211,10 +213,16 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         bundle: 下载后的媒体统计。
 
     Returns:
-        形如 ``作者 发布了新作品`` + 分隔线 + 文案 + 参数行 + 发布时间的多行文案。
+        形如 ``平台 · 作者 发布了新作品`` + 分隔线 + 文案 + 参数行 + 发布时间的多行
+        文案。
     """
 
-    lines = [f"{meta.author_name} 发布了新作品", SEPARATOR]
+    author = (
+        f"{meta.platform_name} · {meta.author_name}"
+        if meta.platform_name
+        else meta.author_name
+    )
+    lines = [f"{author} 发布了新作品", SEPARATOR]
     text = _work_text(result)
     if text:
         lines.extend([text, ""])

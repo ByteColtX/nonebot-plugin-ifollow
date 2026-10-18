@@ -14,6 +14,7 @@ from nonebot_plugin_alconna import UniMessage
 from .media import MediaPolicy, WorkMeta, media_messages_for
 from .platforms import PlatformWork
 from .settings import Settings
+from .style import platform_name
 
 
 @asynccontextmanager
@@ -36,6 +37,7 @@ async def bilibili_media_messages(
         author_name=work.author.name or work.author.author_id,
         create_time=work.create_time,
         duration_unit="s",
+        platform_name=platform_name("bilibili"),
     )
     async with media_messages_for(
         meta,

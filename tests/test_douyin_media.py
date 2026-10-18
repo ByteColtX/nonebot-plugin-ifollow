@@ -67,7 +67,7 @@ async def test_douyin_media_messages_downloads_and_cleans_up(
         assert created["dir"].is_dir()
         caption = messages[0].extract_plain_text()
         assert caption.startswith(
-            f"呆呆丸 发布了新作品\n{media.SEPARATOR}\n标题\n\n00:07"
+            f"抖音 · 呆呆丸 发布了新作品\n{media.SEPARATOR}\n标题\n\n00:07"
         )
         assert "720×1280" in caption
         assert [segment.type for segment in messages[1]] == ["video"]
