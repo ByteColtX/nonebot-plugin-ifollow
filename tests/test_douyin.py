@@ -1,7 +1,9 @@
-from typing import Any, cast
+from typing import Any
 
+import httpx
 import pytest
 
+from http_stub import Stub, install
 from nonebot_plugin_ifollow import douyin_platform as douyin
 from nonebot_plugin_ifollow.platforms import Cursor
 
@@ -17,49 +19,14 @@ def test_extract_sec_user_id() -> None:
     assert douyin.extract_sec_user_id("https://www.douyin.com/video/123") is None
 
 
-class FakeResponse:
-    def __init__(
-        self,
-        status_code: int = 200,
-        content: bytes = b"{}",
-        data: Any = None,
-    ) -> None:
-        self.status_code = status_code
-        self.content = content
-        self.text = content.decode("utf-8", errors="replace")
-        self._data = data
+def response(
+    status_code: int = 200, content: bytes = b"{}", data: Any = None
+) -> httpx.Response:
+    """构造一个真实响应：``data`` 走 JSON，否则原样返回字节。"""
 
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            request = douyin.httpx.Request("GET", "https://www.douyin.com/")
-            raise douyin.httpx.HTTPStatusError(
-                "boom",
-                request=request,
-                response=douyin.httpx.Response(self.status_code, request=request),
-            )
-
-    def json(self) -> Any:
-        if self._data is None:
-            raise ValueError("not json")
-        return self._data
-
-
-class FakeClient:
-    """记录请求并按顺序返回预设响应的 httpx.AsyncClient 替身。"""
-
-    def __init__(self, responses: list[FakeResponse], **_kwargs: Any) -> None:
-        self._responses = responses
-        self.calls: list[dict[str, Any]] = []
-
-    async def __aenter__(self) -> "FakeClient":
-        return self
-
-    async def __aexit__(self, *_args: Any) -> None:
-        return
-
-    async def get(self, url: str, **kwargs: Any) -> FakeResponse:
-        self.calls.append({"url": url, **kwargs})
-        return self._responses[min(len(self.calls), len(self._responses)) - 1]
+    if data is not None:
+        return httpx.Response(status_code, json=data)
+    return httpx.Response(status_code, content=content)
 
 
 def _works_payload(count: int = 1) -> dict[str, Any]:
@@ -79,21 +46,13 @@ def _works_payload(count: int = 1) -> dict[str, Any]:
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """安装替身客户端，并让 ttwid 每次注册都返回新值。"""
-
-    created: list[FakeClient] = []
-
-    def factory(responses: list[FakeResponse]) -> Any:
-        def build(**kwargs: Any) -> FakeClient:
-            fake = FakeClient(responses, **kwargs)
-            created.append(fake)
-            return fake
-
-        monkeypatch.setattr(douyin.httpx, "AsyncClient", build)
-        return created
+    """安装 MockTransport 客户端，并让 ttwid 每次注册都返回新值。"""
 
     counter = iter(range(100))
     ttwids: list[str] = []
+
+    def factory(responses: list[httpx.Response]) -> Stub:
+        return install(monkeypatch, Stub(responses))
 
     async def ensure_ttwid() -> str:
         ttwid = f"ttwid-{next(counter)}"
@@ -119,7 +78,7 @@ def test_signed_query_appends_encoded_a_bogus() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_maps_to_common_model(client: Any) -> None:
-    client([FakeResponse(data=_works_payload())])
+    client([response(data=_works_payload())])
 
     works = await douyin.fetch_latest_works("MS4wLjABAAAA-test")
 
@@ -131,7 +90,7 @@ async def test_fetch_latest_works_maps_to_common_model(client: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_sorts_newest_first(client: Any) -> None:
-    client([FakeResponse(data=_works_payload(count=3))])
+    client([response(data=_works_payload(count=3))])
 
     works = await douyin.fetch_latest_works("MS4wLjABAAAA-test")
 
@@ -140,7 +99,7 @@ async def test_fetch_latest_works_sorts_newest_first(client: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_reports_missing_author(client: Any) -> None:
-    client([FakeResponse(data={"status_code": douyin.INVALID_AUTHOR_STATUS})])
+    client([response(data={"status_code": douyin.INVALID_AUTHOR_STATUS})])
 
     with pytest.raises(douyin.DouyinRequestError) as excinfo:
         await douyin.fetch_latest_works("MS4wLjABAAAA-test")
@@ -153,7 +112,7 @@ async def test_fetch_latest_works_reports_missing_author(client: Any) -> None:
 async def test_fetch_latest_works_retries_with_new_ttwid_on_empty_body(
     client: Any,
 ) -> None:
-    client([FakeResponse(content=b""), FakeResponse(data=_works_payload())])
+    client([response(content=b""), response(data=_works_payload())])
 
     works = await douyin.fetch_latest_works("MS4wLjABAAAA-test")
 
@@ -166,8 +125,8 @@ async def test_fetch_latest_works_retries_with_new_ttwid_on_empty_body(
 async def test_fetch_latest_works_retries_on_blocked_status(client: Any) -> None:
     client(
         [
-            FakeResponse(status_code=403, content=b"Blocked by ArgusSecurityPlugin"),
-            FakeResponse(data=_works_payload()),
+            response(status_code=403, content=b"Blocked by ArgusSecurityPlugin"),
+            response(data=_works_payload()),
         ]
     )
 
@@ -179,7 +138,7 @@ async def test_fetch_latest_works_retries_on_blocked_status(client: Any) -> None
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_gives_up_after_second_block(client: Any) -> None:
-    client([FakeResponse(content=b""), FakeResponse(content=b"")])
+    client([response(content=b""), response(content=b"")])
 
     with pytest.raises(douyin.DouyinRequestError) as excinfo:
         await douyin.fetch_latest_works("MS4wLjABAAAA-test")
@@ -190,7 +149,7 @@ async def test_fetch_latest_works_gives_up_after_second_block(client: Any) -> No
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_rejects_non_json_body(client: Any) -> None:
-    client([FakeResponse(content=b"<html></html>")])
+    client([response(content=b"<html></html>")])
 
     with pytest.raises(douyin.DouyinRequestError) as excinfo:
         await douyin.fetch_latest_works("MS4wLjABAAAA-test")
@@ -200,18 +159,20 @@ async def test_fetch_latest_works_rejects_non_json_body(client: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_work_author_returns_none_when_detail_blocked() -> None:
-    fake = FakeClient([FakeResponse(content=b""), FakeResponse(content=b"")])
+    stub = Stub([response(content=b""), response(content=b"")])
 
-    author = await douyin._fetch_work_author(cast(Any, fake), "100")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(stub)) as fake:
+        author = await douyin._fetch_work_author(fake, "100")
 
     assert author is None
+    assert len(stub.requests) == 2
 
 
 @pytest.mark.asyncio
 async def test_fetch_author_profile_reads_nickname_and_handle(client: Any) -> None:
     client(
         [
-            FakeResponse(
+            response(
                 data={
                     "status_code": 0,
                     "user": {"nickname": "作者", "unique_id": "deagle"},
@@ -231,7 +192,7 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
 
     created = client(
         [
-            FakeResponse(
+            response(
                 data={
                     "status_code": 0,
                     "has_more": True,
@@ -245,7 +206,7 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
                     ],
                 }
             ),
-            FakeResponse(
+            response(
                 data={
                     "status_code": 0,
                     "has_more": False,
@@ -264,7 +225,7 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
     works = await douyin.fetch_latest_works("MS4wLjABAAAA-test", Cursor("100", 10))
 
     assert [work.work_id for work in works] == ["103", "100"]
-    assert len(created[0].calls) == 2
+    assert len(created.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -273,7 +234,7 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
 ) -> None:
     created = client(
         [
-            FakeResponse(
+            response(
                 data={
                     "status_code": 0,
                     "has_more": True,
@@ -293,7 +254,7 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
     works = await douyin.fetch_latest_works("MS4wLjABAAAA-test")
 
     assert [work.work_id for work in works] == ["103"]
-    assert len(created[0].calls) == 1
+    assert len(created.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -304,7 +265,7 @@ async def test_fetch_latest_works_omits_count_and_stops_at_limit(
 
     created = client(
         [
-            FakeResponse(
+            response(
                 data={
                     "status_code": 0,
                     "has_more": True,
@@ -318,5 +279,5 @@ async def test_fetch_latest_works_omits_count_and_stops_at_limit(
     works = await douyin.fetch_latest_works("MS4wLjABAAAA-test", Cursor("old", 1))
 
     assert len(works) == 5
-    assert len(created[0].calls) == 1
-    assert "&count=" not in created[0].calls[0]["url"]
+    assert len(created.requests) == 1
+    assert "count=" not in str(created.requests[0].url)
