@@ -5,7 +5,7 @@
 ## ✨ nonebot-plugin-ifollow ✨
 [![LICENSE](https://img.shields.io/github/license/ByteColtX/nonebot-plugin-ifollow.svg)](./LICENSE)
 [![pypi](https://img.shields.io/pypi/v/nonebot-plugin-ifollow.svg)](https://pypi.org/project/nonebot-plugin-ifollow/)
-[![python](https://img.shields.io/badge/python-3.10|3.11|3.12|3.13|3.14-blue.svg)](https://www.python.org)
+[![python](https://img.shields.io/badge/python-3.12|3.13|3.14-blue.svg)](https://www.python.org)
 [![uv](https://img.shields.io/badge/package%20manager-uv-black?style=flat-square&logo=uv)](https://github.com/astral-sh/uv)
 <br/>
 [![ruff](https://img.shields.io/badge/code%20style-ruff-black?style=flat-square&logo=ruff)](https://github.com/astral-sh/ruff)
@@ -15,8 +15,9 @@
 
 ## 📖 介绍
 
-订阅抖音和 B 站作者的新作品及动态，并将作品分享链接交给
-[nonebot-plugin-parser](https://github.com/fllesser/nonebot-plugin-parser) 下载和发送。
+订阅抖音和 B 站作者的新作品及动态，并将作品分享链接交给解析库下载和发送：抖音用
+[parsehub](https://github.com/z-mio/ParseHub)，B 站用
+[nonebot-plugin-parser](https://github.com/fllesser/nonebot-plugin-parser)。
 支持抖音作者主页链接、作者主页短链、`sec_user_id`，以及 B 站作者主页和作品链接，
 每个会话独立记录已发送作品。
 
@@ -97,6 +98,7 @@
 | :--- | :---: | :---: | :--- |
 | `IFOLLOW_SUBSCRIBE_INTERVAL` | 否 | `300` | 所有平台共享的轮询间隔，单位为秒，最小 30 秒 |
 | `IFOLLOW_SUBSCRIBE_COUNT` | 否 | `20` | 每个平台每次拉取的最新内容数，范围 1-50 |
+| `IFOLLOW_MEDIA_MAX_MB` | 否 | `90` | 抖音单个媒体文件的体积上限，超出则跳过该媒体 |
 | `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，通常无需填写，详见下方说明 |
 | `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie，接口或视频下载受限时填写 |
 
@@ -105,6 +107,7 @@
 ```dotenv
 IFOLLOW_SUBSCRIBE_INTERVAL=300
 IFOLLOW_SUBSCRIBE_COUNT=20
+IFOLLOW_MEDIA_MAX_MB=90
 IFOLLOW_DOUYIN_COOKIE="你的抖音网页 Cookie"
 IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
 ```

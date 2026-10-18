@@ -3,7 +3,7 @@ name = "nonebot-plugin-ifollow"
 version = "1.0.0"
 description = "NoneBot2 多平台作者更新订阅插件"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [{ name = "ByteColtX", email = "umk@live.com" }]
 dependencies = [
   "gmssl>=3.2.2,<4.0.0",
@@ -12,7 +12,9 @@ dependencies = [
   "nonebot-plugin-alconna>=0.60.0,<1.0.0",
   "nonebot-plugin-apscheduler>=0.5.0,<1.0.0",
   "nonebot-plugin-localstore>=0.7.4,<1.0.0",
+  # B 站发送仍走 parser，抖音已改用 parsehub，待 B 站迁移完成后移除
   "nonebot-plugin-parser>=2.6.8,<3.0.0",
+  "parsehub>=2.3.10,<3.0.0",
   "nonebot2>=2.5.0,<3.0.0",
 ]
 
@@ -64,13 +66,13 @@ asyncio_default_fixture_loop_scope = "session"
 
 [tool.pyright]
 include = ["src", "tests"]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
 typeCheckingMode = "standard"
 
 [tool.ruff]
 line-length = 88
 src = ["src", "tests"]
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "ASYNC", "C4", "PT", "RUF"]
