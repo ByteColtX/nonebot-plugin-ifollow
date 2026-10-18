@@ -14,6 +14,7 @@ dependencies = [
   "nonebot-plugin-localstore>=0.7.4,<1.0.0",
   "nonebot2>=2.5.0,<3.0.0",
   "parsehub>=2.3.10,<3.0.0",
+  "pydantic>=2.0.0,<3.0.0",
 ]
 
 [project.urls]
@@ -37,6 +38,9 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.10.0,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+wheel-exclude = ["*.SPEC.md"]  # SPEC 是维护者文档，只留在源码里
 
 [tool.nonebot]
 plugins = ["nonebot_plugin_ifollow"]
