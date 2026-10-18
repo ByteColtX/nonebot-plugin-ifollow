@@ -41,6 +41,11 @@ build-backend = "uv_build"
 [tool.nonebot]
 plugins = ["nonebot_plugin_ifollow"]
 
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+
 [tool.poe.tasks]
 test = "pytest --cov=src --cov-report=xml --junitxml=./junit.xml -n auto"
 bump = "bump-my-version bump"
