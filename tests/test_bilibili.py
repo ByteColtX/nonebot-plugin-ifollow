@@ -546,3 +546,30 @@ async def test_warm_up_calls_buvid(monkeypatch: pytest.MonkeyPatch) -> None:
     await bili.warm_up_bilibili()
 
     assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_app_video_works_omits_ps_and_stops_at_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不再传分页条数；攒够补发上限后不再翻页。"""
+
+    use_app_responses(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "item": [
+                    {"bvid": f"BV1{index}", "ctime": 200 - index, "param": str(index)}
+                    for index in range(5)
+                ],
+                "has_next": True,
+            },
+        },
+    )
+
+    works = await bili.fetch_video_works("123", cursor=Cursor("BV1old"))
+
+    assert len(works) == 5
+    assert len(FakeAppClient.requests) == 1
+    assert "ps" not in FakeAppClient.requests[0]["params"]

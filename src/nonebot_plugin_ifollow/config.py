@@ -7,11 +7,11 @@ from pydantic import BaseModel, Field
 class Config(BaseModel):
     """爱播订阅配置。"""
 
-    ifollow_subscribe_interval: int = Field(default=1800, ge=30)
+    ifollow_sub_interval: int = Field(default=1800, ge=30)
     """每个作者的轮询周期，单位为秒；月更作者无需高频轮询。"""
 
-    ifollow_subscribe_count: int = Field(default=20, ge=1, le=50)
-    """每个平台每次拉取的最新内容数量。"""
+    ifollow_sub_max_items: int = Field(default=5, ge=1, le=50)
+    """每个作者每个 feed 一次轮询最多补发的作品数；超出上限的较早作品不再补发。"""
 
     ifollow_douyin_cookie: str | None = None
     """可选的抖音网页 Cookie。"""

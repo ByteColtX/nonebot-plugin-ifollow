@@ -294,3 +294,29 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
 
     assert [work.work_id for work in works] == ["103"]
     assert len(created[0].calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_works_omits_count_and_stops_at_limit(
+    client: Any,
+) -> None:
+    """不再传分页条数；攒够补发上限后不再翻页。"""
+
+    created = client(
+        [
+            FakeResponse(
+                data={
+                    "status_code": 0,
+                    "has_more": True,
+                    "max_cursor": "50",
+                    **_works_payload(count=5),
+                }
+            )
+        ]
+    )
+
+    works = await douyin.fetch_latest_works("MS4wLjABAAAA-test", Cursor("old", 1))
+
+    assert len(works) == 5
+    assert len(created[0].calls) == 1
+    assert "&count=" not in created[0].calls[0]["url"]

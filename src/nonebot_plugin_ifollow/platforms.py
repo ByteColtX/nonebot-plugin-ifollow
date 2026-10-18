@@ -8,9 +8,6 @@ from typing import Literal
 
 ContentKind = Literal["video", "dynamic"]
 
-MAX_CATCHUP_PAGES = 5
-"""一次补发最多翻页数，避免停机过久时无限追赶。"""
-
 
 @dataclass(frozen=True)
 class Cursor:
