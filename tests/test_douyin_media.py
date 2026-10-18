@@ -6,6 +6,7 @@ import pytest
 
 from nonebot_plugin_ifollow import douyin_media, media
 from nonebot_plugin_ifollow.platforms import AuthorInfo, PlatformWork
+from nonebot_plugin_ifollow.settings import Settings
 
 CREATE_TIME = 1791073726
 
@@ -53,10 +54,16 @@ async def test_douyin_media_messages_downloads_and_cleans_up(
         return FakeResult()
 
     monkeypatch.setattr(media, "parse_work", fake_parse)
-    monkeypatch.setattr(douyin_media.config, "ifollow_douyin_cookie", "ttwid=x")
 
     url = "https://www.douyin.com/video/7695356981436382393"
-    async with douyin_media.douyin_media_messages(make_work(url)) as messages:
+    settings = Settings(
+        interval=1800,
+        max_items=5,
+        media_max_bytes=100 * 1024 * 1024,
+        use_base64=False,
+        douyin_cookie="cookie=x",
+    )
+    async with douyin_media.douyin_media_messages(make_work(url), settings) as messages:
         assert created["dir"].is_dir()
         caption = messages[0].extract_plain_text()
         assert caption.startswith(
@@ -67,4 +74,4 @@ async def test_douyin_media_messages_downloads_and_cleans_up(
 
     assert not created["dir"].exists()
     assert created["url"] == url
-    assert created["cookie"] == "ttwid=x"
+    assert created["cookie"] == "cookie=x"

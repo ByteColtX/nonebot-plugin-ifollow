@@ -15,6 +15,12 @@ def make_file(path: Path, **extra: Any) -> SimpleNamespace:
     return SimpleNamespace(path=path, **extra)
 
 
+def policy(max_bytes: int = 0) -> media.MediaPolicy:
+    """构造媒体策略。"""
+
+    return media.MediaPolicy(max_bytes=max_bytes)
+
+
 def write(path: Path, size: int = 8, suffix: str = ".png") -> Path:
     target = path.with_suffix(suffix)
     target.write_bytes(b"x" * size)
@@ -222,7 +228,7 @@ async def test_oversized_video_is_dropped_before_download(
     monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
     result = SimpleNamespace(media=[FakeRef("https://cdn/video.mp4")])
 
-    await media._drop_oversized_media(result, 1024, "抖音")
+    await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media is None
 
@@ -239,7 +245,7 @@ async def test_unknown_size_keeps_media_for_post_download_check(
     ref = FakeRef("https://cdn/video.mp4")
     result = SimpleNamespace(media=[ref])
 
-    await media._drop_oversized_media(result, 1024, "抖音")
+    await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media == [ref]
 
@@ -257,7 +263,7 @@ async def test_images_are_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
     ref = FakeRef("https://cdn/image.jpg", ext="jpg")
     result = SimpleNamespace(media=[ref])
 
-    await media._drop_oversized_media(result, 1024, "抖音")
+    await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert probed == []
     assert result.media == [ref]
@@ -273,7 +279,7 @@ async def test_live_photo_probes_motion_video(monkeypatch: pytest.MonkeyPatch) -
     ref = FakeRef("https://cdn/live.jpg", ext="jpg", video_url="https://cdn/live.mp4")
     result = SimpleNamespace(media=[ref])
 
-    await media._drop_oversized_media(result, 1024, "抖音")
+    await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media is None
 
@@ -292,7 +298,7 @@ async def test_mixed_album_keeps_media_within_limit(
     small = FakeRef("https://cdn/c.mp4")
     result = SimpleNamespace(media=[image, big, small])
 
-    await media._drop_oversized_media(result, 1024, "抖音")
+    await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media == [image, small]
 
@@ -328,10 +334,10 @@ async def test_media_messages_for_skips_download_when_everything_is_too_big(
     async with media.media_messages_for(
         META,
         "https://www.douyin.com/video/1",
+        policy=policy(1024),
         cookie=None,
         label="抖音",
         temp_prefix="ifollow-test-",
-        max_bytes=1024,
     ) as messages:
         assert messages[0].extract_plain_text().startswith("呆呆丸 发布了新作品")
 

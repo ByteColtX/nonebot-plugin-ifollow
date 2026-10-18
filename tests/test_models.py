@@ -1,96 +1,111 @@
-import json
 from pathlib import Path
 
 import pytest
 
-from nonebot_plugin_ifollow.models import SubscriptionStore, make_target_key
+from nonebot_plugin_ifollow.models import (
+    STORAGE_VERSION,
+    AuthorSubscription,
+    SubscriptionStore,
+    make_target_key,
+)
 from nonebot_plugin_ifollow.platforms import Cursor
 
 
+def target() -> dict[str, object]:
+    return {"id": "group-1", "channel": True, "scope": "group"}
+
+
+def test_make_target_key_is_stable_and_ignores_defaults() -> None:
+    first = make_target_key({"id": "g", "channel": True})
+    second = make_target_key({"id": "g", "channel": True, "private": False})
+
+    assert first == second
+    assert first != make_target_key({"id": "g", "private": True})
+
+
 @pytest.mark.asyncio
-async def test_multi_platform_round_trip_and_independent_cursors(
+async def test_store_roundtrip_and_flush(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target(
+        "douyin",
+        "sec",
+        "作者",
+        target_key,
+        target(),
+        {"video": Cursor("w1", 100)},
+        subscriber_id="42",
+        author_handle="handle",
+        last_update_time=100,
+    )
+    await store.flush()
+
+    reloaded = SubscriptionStore(tmp_path)
+    snapshot = await reloaded.snapshot()
+    author = snapshot["douyin:sec"]
+
+    assert author.author_name == "作者"
+    assert author.author_handle == "handle"
+    assert author.targets[target_key].cursors["video"] == Cursor("w1", 100)
+    assert author.targets[target_key].subscriber_ids == ["42"]
+
+
+@pytest.mark.asyncio
+async def test_cursor_updates_are_batched_until_flush(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target(
+        "bilibili", "1", "作者", target_key, target(), {"video": Cursor("w1", 1)}
+    )
+    await store.flush()
+    path = tmp_path / "subscriptions.json"
+    before = path.read_text(encoding="utf-8")
+
+    await store.update_cursor("bilibili", "1", target_key, "video", Cursor("w2", 2))
+    await store.update_cursor("bilibili", "1", target_key, "video", Cursor("w3", 3))
+
+    assert path.read_text(encoding="utf-8") == before
+
+    await store.flush()
+
+    assert "w3" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_is_a_deep_copy(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target(
+        "bilibili", "1", "作者", target_key, target(), {"video": Cursor("w1", 1)}
+    )
+
+    snapshot = await store.snapshot()
+    snapshot["bilibili:1"].targets[target_key].cursors["video"] = Cursor("hack", 9)
+
+    fresh = await store.snapshot()
+    assert fresh["bilibili:1"].targets[target_key].cursors["video"] == Cursor("w1", 1)
+
+
+@pytest.mark.asyncio
+async def test_add_target_rejects_duplicate(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target("bilibili", "1", "作者", target_key, target(), {})
+
+    assert not await store.add_target("bilibili", "1", "作者", target_key, target(), {})
+
+
+@pytest.mark.asyncio
+async def test_remove_subscriber_drops_target_when_last_one_leaves(
     tmp_path: Path,
 ) -> None:
     store = SubscriptionStore(tmp_path)
-    target = {"id": "87654321", "private": False}
-    target_key = make_target_key(target)
-
-    await store.upsert_target(
-        "douyin",
-        "same-id",
-        "抖音作者",
-        target_key,
-        target,
-        {"video": Cursor("aweme-1", 100)},
-        "douyin-id",
-        100,
-    )
-    await store.upsert_target(
-        "bilibili",
-        "same-id",
-        "B站作者",
-        target_key,
-        target,
-        {"video": Cursor("BV1", 200), "dynamic": Cursor("dynamic-1", 200)},
-        "same-id",
-        200,
+    target_key = make_target_key(target())
+    await store.add_target(
+        "bilibili", "1", "作者", target_key, target(), {}, subscriber_id="42"
     )
 
-    stored = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
-    assert stored["version"] == 2
-    assert len(stored["subscriptions"]) == 2
-    assert stored["subscriptions"][0]["targets"][0]["cursors"] == {
-        "video": {"id": "aweme-1", "time": 100}
-    }
-
-    loaded = SubscriptionStore(tmp_path)
-    snapshot = await loaded.snapshot()
-    assert snapshot["douyin:same-id"].targets[target_key].cursors == {
-        "video": Cursor("aweme-1", 100)
-    }
-    assert snapshot["bilibili:same-id"].targets[target_key].cursors == {
-        "video": Cursor("BV1", 200),
-        "dynamic": Cursor("dynamic-1", 200),
-    }
-
-    await loaded.update_cursor(
-        "bilibili", "same-id", target_key, "dynamic", Cursor("dynamic-2", 300)
-    )
-    assert (await loaded.snapshot())["bilibili:same-id"].targets[target_key].cursors[
-        "dynamic"
-    ] == Cursor("dynamic-2", 300)
-
-
-@pytest.mark.asyncio
-async def test_add_target_and_subscribers(tmp_path: Path) -> None:
-    store = SubscriptionStore(tmp_path)
-    target = {"id": "group"}
-    target_key = make_target_key(target)
-    assert await store.add_target(
-        "bilibili",
-        "123",
-        "作者",
-        target_key,
-        target,
-        {"video": Cursor("BV1", 1)},
-        subscriber_id="111",
-    )
-    assert not await store.add_target(
-        "bilibili",
-        "123",
-        "作者",
-        target_key,
-        target,
-        {"video": Cursor("BV2", 2)},
-    )
-    assert await store.add_subscriber("bilibili", "123", target_key, "222")
-    assert not await store.add_subscriber("bilibili", "123", target_key, "222")
-
-    assert await store.remove_subscriber("bilibili", "123", target_key, "111") == (
-        True,
-        False,
-    )
-    assert await store.remove_subscriber("bilibili", "123", target_key, "222") == (
+    assert await store.remove_subscriber("bilibili", "1", target_key, "42") == (
         True,
         True,
     )
@@ -98,81 +113,73 @@ async def test_add_target_and_subscribers(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v1_string_cursors_are_migrated_on_write(tmp_path: Path) -> None:
-    """v1 的字符串游标读入后补上 ``time=0``，写回时升级成 v2 结构。"""
+async def test_remove_subscriber_keeps_target_for_others(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target(
+        "bilibili", "1", "作者", target_key, target(), {}, subscriber_id="42"
+    )
+    await store.add_subscriber("bilibili", "1", target_key, "43")
 
-    target = {"id": "group"}
-    target_key = make_target_key(target)
+    assert await store.remove_subscriber("bilibili", "1", target_key, "42") == (
+        True,
+        False,
+    )
+    snapshot = await store.snapshot()
+    assert snapshot["bilibili:1"].targets[target_key].subscriber_ids == ["43"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_version_falls_back_to_empty_store(tmp_path: Path) -> None:
     (tmp_path / "subscriptions.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "subscriptions": [
-                    {
-                        "platform": "bilibili",
-                        "author_id": "123",
-                        "name": "作者",
-                        "targets": [
-                            {
-                                "target": target,
-                                "cursors": {"video": "BV1", "dynamic": None},
-                            }
-                        ],
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
+        '{"version": 2, "subscriptions": []}', encoding="utf-8"
     )
 
     store = SubscriptionStore(tmp_path)
+
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_corrupt_json_falls_back_to_empty_store(tmp_path: Path) -> None:
+    (tmp_path / "subscriptions.json").write_text("{not json", encoding="utf-8")
+
+    store = SubscriptionStore(tmp_path)
+
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_author_metadata_is_updated_once(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target("bilibili", "1", "旧名", target_key, target(), {})
+
+    await store.update_author_metadata("bilibili", "1", "新名", "handle", 100)
+    await store.flush()
     snapshot = await store.snapshot()
 
-    assert snapshot["bilibili:123"].targets[target_key].cursors == {
-        "video": Cursor("BV1", 0)
-    }
-
-    await store.update_cursor("bilibili", "123", target_key, "video", Cursor("BV2", 9))
-
-    stored = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
-    assert stored["version"] == 2
-    assert stored["subscriptions"][0]["targets"][0]["cursors"] == {
-        "video": {"id": "BV2", "time": 9}
-    }
+    assert snapshot["bilibili:1"].author_name == "新名"
+    assert snapshot["bilibili:1"].author_handle == "handle"
+    assert snapshot["bilibili:1"].last_update_time == 100
 
 
 @pytest.mark.asyncio
-async def test_unchanged_metadata_does_not_rewrite_file(tmp_path: Path) -> None:
-    """内容没变时不落盘：每轮 34 次空写是 SD 卡的写入来源。"""
-
+async def test_transaction_flushes_on_exit(tmp_path: Path) -> None:
     store = SubscriptionStore(tmp_path)
-    target = {"id": "group"}
-    target_key = make_target_key(target)
-    await store.add_target(
-        "bilibili",
-        "123",
-        "作者",
-        target_key,
-        target,
-        {"video": Cursor("BV1", 1)},
-        author_handle="123",
-        last_update_time=5,
-    )
-    path = tmp_path / "subscriptions.json"
-    before = path.stat().st_ino
+    target_key = make_target_key(target())
 
-    await store.update_author_metadata("bilibili", "123", "作者", "123", 5)
+    async with store.transaction():
+        await store.add_target("bilibili", "1", "作者", target_key, target(), {})
 
-    assert path.stat().st_ino == before
-
-    await store.update_author_metadata("bilibili", "123", "作者", "123", 6)
-
-    assert path.stat().st_ino != before
+    assert (tmp_path / "subscriptions.json").exists()
 
 
-@pytest.mark.asyncio
-async def test_legacy_authors_storage_is_ignored(tmp_path: Path) -> None:
-    (tmp_path / "subscriptions.json").write_text(
-        json.dumps({"version": 2, "authors": []}), encoding="utf-8"
-    )
-    assert await SubscriptionStore(tmp_path).snapshot() == {}
+def test_storage_version_is_current() -> None:
+    assert STORAGE_VERSION == 3
+
+
+def test_author_key_is_namespaced() -> None:
+    author = AuthorSubscription("douyin", "sec", "作者")
+
+    assert author.key == "douyin:sec"
