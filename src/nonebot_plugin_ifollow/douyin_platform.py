@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 from nonebot import logger
 
 from .config import config
+from .douyin_abogus import generate_abogus
 from .platforms import AuthorInfo, PlatformWork
 
 PROFILE_RE = re.compile(
@@ -21,7 +24,19 @@ SHORT_LINK_RE = re.compile(r"https?://(?:v|jx)\.douyin\.com/[\w-]+")
 WORK_RE = re.compile(r"(?:https?://)?(?:www\.|m\.)?douyin\.com/video/(?P<aweme_id>\d+)")
 WORK_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 AUTHOR_PROFILE_URL = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+AUTHOR_POST_URL = "https://www.douyin.com/aweme/v1/web/aweme/post/"
 TTWID_REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+"""请求与 a_bogus 签名共用的 User-Agent，两者必须一致。"""
+
+BLOCKED_STATUS_CODES = frozenset({403, 429, 444, 500, 502, 503, 504})
+"""抖音风控或网关异常时返回的状态码，通常可重试。"""
+
+INVALID_AUTHOR_STATUS = 5
+"""作品列表接口表示作者不存在或已注销的 status_code。"""
 
 _ttwid: str | None = None
 _ttwid_lock = asyncio.Lock()
@@ -93,17 +108,14 @@ async def resolve_sec_user_id(value: str) -> str:
 async def _fetch_work_author(client: httpx.AsyncClient, aweme_id: str) -> str | None:
     """从作品详情接口提取作者的 sec_user_id。"""
 
-    response = await client.get(
-        WORK_DETAIL_URL,
-        params={"aweme_id": aweme_id, "aid": "6383"},
-        cookies=await _request_cookies(),
-    )
-    response.raise_for_status()
     try:
-        data = response.json()
-    except ValueError:
-        return None
-    if not isinstance(data, dict):
+        data = await _request_json(
+            client,
+            WORK_DETAIL_URL,
+            {"device_platform": "webapp", "aid": "6383", "aweme_id": aweme_id},
+        )
+    except DouyinRequestError as exc:
+        logger.debug(f"抖音作品详情接口不可用，改用作品页解析：{exc}")
         return None
     detail = data.get("aweme_detail")
     if not isinstance(detail, dict):
@@ -152,35 +164,16 @@ async def fetch_latest_works(sec_user_id: str) -> list[PlatformWork]:
         timeout=30,
         verify=False,
     ) as client:
-        response = await client.get(
-            "https://www.douyin.com/aweme/v1/web/aweme/post/",
-            params=params,
-            cookies=await _request_cookies(),
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            status_code = response.status_code
-            raise DouyinRequestError(
-                "抖音作品接口请求失败："
-                f"HTTP {status_code}，响应内容：{_response_excerpt(response.text)}",
-                retryable=status_code in {403, 429, 444, 500, 502, 503, 504},
-            ) from exc
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise DouyinRequestError(
-                "抖音作品接口返回的不是 JSON："
-                f"HTTP {response.status_code}，响应内容："
-                f"{_response_excerpt(response.text)}",
-                retryable=True,
-            ) from exc
+        data = await _request_json(client, AUTHOR_POST_URL, params)
 
-    if not isinstance(data, dict):
-        raise DouyinRequestError("抖音接口返回格式异常")
     status_code = data.get("status_code", 0)
     if status_code not in (0, "0", None):
-        raise DouyinRequestError(f"抖音接口返回错误码: {status_code}")
+        if str(status_code) == str(INVALID_AUTHOR_STATUS):
+            raise DouyinRequestError(
+                f"抖音作者不存在或已注销：{sec_user_id}",
+                retryable=False,
+            )
+        raise DouyinRequestError(f"抖音接口返回错误码: {status_code}", retryable=True)
 
     raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
     if not isinstance(raw_works, list):
@@ -234,19 +227,12 @@ async def fetch_author_profile(sec_user_id: str) -> tuple[str, str]:
         timeout=20,
         verify=False,
     ) as client:
-        response = await client.get(
+        data = await _request_json(
+            client,
             AUTHOR_PROFILE_URL,
-            params={"sec_user_id": sec_user_id, "aid": "6383"},
-            cookies=await _request_cookies(),
+            {"device_platform": "webapp", "aid": "6383", "sec_user_id": sec_user_id},
         )
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise DouyinRequestError("抖音作者资料接口返回的不是 JSON") from exc
 
-    if not isinstance(data, dict):
-        raise DouyinRequestError("抖音作者资料接口返回格式异常")
     status_code = data.get("status_code", 0)
     if status_code not in (0, "0", None):
         raise DouyinRequestError(f"抖音作者资料接口返回错误码: {status_code}")
@@ -264,6 +250,82 @@ def _extract_unique_id(author: dict[str, object]) -> str:
         return unique_id
     short_id = str(author.get("short_id") or "")
     return short_id if short_id and short_id != "0" else ""
+
+
+async def _request_json(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, str],
+) -> dict[str, Any]:
+    """带 a_bogus 签名请求抖音 web 接口，并返回解析后的 JSON。
+
+    抖音网关会以 403 或空响应拦截签名、ttwid 失效的请求。遇到这类响应时丢弃缓存
+    的 ttwid，重新注册后重试一次；仍失败则抛出可重试异常。
+
+    Args:
+        client: 已配置好请求头的 HTTP 客户端。
+        url: 接口地址，不含查询串。
+        params: 接口查询参数。
+
+    Returns:
+        解析后的 JSON 对象。
+
+    Raises:
+        DouyinRequestError: 接口被拦截、请求失败或返回内容不是 JSON 对象。
+    """
+
+    last_error: DouyinRequestError | None = None
+    for _ in range(2):
+        response = await client.get(
+            f"{url}?{_signed_query(params)}",
+            cookies=await _request_cookies(),
+        )
+        blocked = (
+            response.status_code in BLOCKED_STATUS_CODES or not response.content.strip()
+        )
+        if blocked:
+            _invalidate_ttwid()
+            last_error = DouyinRequestError(
+                "抖音接口被风控拦截："
+                f"HTTP {response.status_code}，响应内容："
+                f"{_response_excerpt(response.text)}",
+                retryable=True,
+            )
+            logger.debug(f"抖音接口响应异常，已重置 ttwid：{last_error}")
+            continue
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DouyinRequestError(
+                "抖音接口请求失败："
+                f"HTTP {response.status_code}，响应内容："
+                f"{_response_excerpt(response.text)}",
+                retryable=response.status_code in BLOCKED_STATUS_CODES,
+            ) from exc
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DouyinRequestError(
+                "抖音接口返回的不是 JSON："
+                f"HTTP {response.status_code}，响应内容："
+                f"{_response_excerpt(response.text)}",
+                retryable=True,
+            ) from exc
+        if not isinstance(data, dict):
+            raise DouyinRequestError("抖音接口返回格式异常")
+        return data
+
+    if last_error is None:  # pragma: no cover - 循环至少执行一次
+        raise DouyinRequestError("抖音接口请求失败")
+    raise last_error
+
+
+def _signed_query(params: dict[str, str]) -> str:
+    """把查询参数拼成带 a_bogus 签名的查询串。"""
+
+    query = urlencode(params)
+    signature = generate_abogus(query, user_agent=USER_AGENT)
+    return f"{query}&a_bogus={quote(signature, safe='')}"
 
 
 async def _ensure_ttwid() -> str:
@@ -314,8 +376,19 @@ async def _ensure_ttwid() -> str:
         return ttwid
 
 
+def _invalidate_ttwid() -> None:
+    """丢弃缓存的 ttwid，让下一次请求重新注册。"""
+
+    global _ttwid
+
+    _ttwid = None
+
+
 async def _request_cookies() -> dict[str, str]:
-    """组合配置 Cookie 与 parser_lite 风格的 ttwid Cookie。"""
+    """组合配置 Cookie 与自动注册的 ttwid Cookie。
+
+    配置 Cookie 中的 ttwid 会被自动注册的 ttwid 覆盖，以保证签名失效时能自愈。
+    """
 
     cookies = _parse_cookie(config.ifollow_douyin_cookie)
     cookies["ttwid"] = await _ensure_ttwid()
@@ -337,12 +410,10 @@ def _parse_cookie(raw_cookie: str | None) -> dict[str, str]:
 
 def _headers() -> dict[str, str]:
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": USER_AGENT,
         "Referer": "https://www.douyin.com/",
         "Origin": "https://open.douyin.com",
         "Accept": "application/json, text/plain, */*",
+        "x-tt-argus": "1",
     }
     return headers
