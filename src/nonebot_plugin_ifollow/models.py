@@ -262,9 +262,27 @@ class SubscriptionStore:
             return True
 
     async def remove_subscriber(
-        self, platform: Platform, author_id: str, target_key: str, subscriber_id: str
+        self,
+        platform: Platform,
+        author_id: str,
+        target_key: str,
+        subscriber_id: str,
+        *,
+        force: bool = False,
     ) -> tuple[bool, bool]:
-        """移除订阅人，返回（是否移除、是否删除整个目标）。"""
+        """移除订阅人，返回（是否移除、是否删除整个目标）。
+
+        Args:
+            platform: 平台。
+            author_id: 作者 ID。
+            target_key: 目标会话键。
+            subscriber_id: 发起人。
+            force: 管理员路径：不要求自己是订阅人，直接删掉整个目标；
+                订阅人列表为空的老数据也只有这条路径能删。
+
+        Returns:
+            ``(是否移除, 是否删除整个目标)``。
+        """
 
         async with self._lock:
             await self._ensure_loaded()
@@ -274,10 +292,18 @@ class SubscriptionStore:
             target = author.targets.get(target_key)
             if target is None:
                 return False, False
-            if target.subscriber_ids and subscriber_id not in target.subscriber_ids:
+            if force:
+                del author.targets[target_key]
+                if not author.targets:
+                    del self._authors[author.key]
+                self._dirty = True
+                return True, True
+            # 老数据没有订阅人列表：普通群员不能删，否则谁都能删别人的订阅
+            if not target.subscriber_ids:
                 return False, False
-            if subscriber_id in target.subscriber_ids:
-                target.subscriber_ids.remove(subscriber_id)
+            if subscriber_id not in target.subscriber_ids:
+                return False, False
+            target.subscriber_ids.remove(subscriber_id)
             removed_target = not target.subscriber_ids
             if removed_target:
                 del author.targets[target_key]

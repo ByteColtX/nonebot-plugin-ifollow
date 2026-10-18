@@ -305,8 +305,94 @@ async def test_unsubscribe_reports_missing_subscription(
     await commands.unsubscribe(make_event(user_id="99"), Mock(), args("sec"))
 
     assert FakeUniMessage.sent == [
-        "本会话没有你的这个订阅。发送 爱播订阅列表 可查看当前订阅。"
+        "「抖音 · 作者」不是你订阅的，只有订阅人、群管理或机器人管理员可以取消。"
     ]
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_member_cannot_cancel_others(env: Any) -> None:
+    """普通群员只能取消自己建的订阅。"""
+
+    store, _ = env
+    await seed_subscription(store)  # 订阅人是 42
+
+    await commands.unsubscribe(make_event(user_id="99"), Mock(), args("1"))
+
+    assert "不是你订阅的" in FakeUniMessage.sent[0]
+    assert len(await store.snapshot()) == 1
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_group_admin_cancels_others(env: Any) -> None:
+    """群管理员可以取消别人的订阅，整条删掉。"""
+
+    store, _ = env
+    await seed_subscription(store)
+    event = make_event(user_id="99")
+    event.sender.role = "admin"
+
+    await commands.unsubscribe(event, Mock(), args("1"))
+
+    assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_group_owner_cancels_others(env: Any) -> None:
+    """群主同样算管理员。"""
+
+    store, _ = env
+    await seed_subscription(store)
+    event = make_event(user_id="99")
+    event.sender.role = "owner"
+
+    await commands.unsubscribe(event, Mock(), args("1"))
+
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_member_cannot_delete_legacy_entry(env: Any) -> None:
+    """订阅人列表为空的老数据，普通群员不能删。"""
+
+    store, _ = env
+    key = target_key()
+    await store.add_target(
+        "douyin",
+        "sec",
+        "作者",
+        key,
+        Target.group("group").dump(),
+        {"video": Cursor("old", 1)},
+    )
+
+    await commands.unsubscribe(make_event(user_id="42"), Mock(), args("1"))
+
+    assert "不是你订阅的" in FakeUniMessage.sent[0]
+    assert len(await store.snapshot()) == 1
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_superuser_cancels_legacy_entry(env: Any) -> None:
+    """机器人超级用户可以删老数据。"""
+
+    store, _ = env
+    key = target_key()
+    await store.add_target(
+        "douyin",
+        "sec",
+        "作者",
+        key,
+        Target.group("group").dump(),
+        {"video": Cursor("old", 1)},
+    )
+    from nonebot import get_driver
+
+    get_driver().config.superusers.add("99")
+
+    await commands.unsubscribe(make_event(user_id="99"), Mock(), args("1"))
+
+    assert await store.snapshot() == {}
 
 
 def test_target_subscriptions_group_by_platform() -> None:
@@ -382,7 +468,11 @@ async def test_unsubscribe_index_matches_displayed_order(env: Any) -> None:
         "douyin", "d1", "抖音作者", key, Target.group("group").dump(), {}
     )
 
-    await commands.unsubscribe(make_event(), Mock(), args("1"))
+    # 这两条是老数据（没有订阅人列表），普通群员删不了，这里用管理员身份验顺序
+    event = make_event()
+    event.sender.role = "admin"
+
+    await commands.unsubscribe(event, Mock(), args("1"))
 
     snapshot = await store.snapshot()
     assert ordered[0].author_id == "d1"

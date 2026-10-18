@@ -115,9 +115,32 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     ).send(target=target, bot=bot)
 
 
+def can_manage(event: Event) -> bool:
+    """判断发言人是否有管理权限。
+
+    机器人超级用户在任何会话都有；群里则看发送者的角色（群主 / 管理员）。
+    普通群员只能动自己的订阅。
+
+    Args:
+        event: 消息事件。
+
+    Returns:
+        有管理权限时返回 True。
+    """
+
+    if event.get_user_id() in get_driver().config.superusers:
+        return True
+    sender = getattr(event, "sender", None)
+    return getattr(sender, "role", None) in ("owner", "admin")
+
+
 @UNSUBSCRIBE.handle()
 async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> None:
-    """取消当前会话中的作者订阅。"""
+    """取消当前会话的订阅。
+
+    权限：订阅人本人、群主 / 群管理员、机器人超级用户。
+    管理员取消会直接删掉整条订阅（不管里面有几个订阅人）。
+    """
 
     context = runtime()
     value = args.extract_plain_text().strip()
@@ -133,9 +156,10 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         ).finish()
     platform, author_id, author_name = await _resolve_target(context, items, value)
     label = formatting.author_label(platform, author_name)
+    force = can_manage(event)
     async with context.store.transaction():
         removed, target_removed = await context.store.remove_subscriber(
-            platform, author_id, target_key, event.get_user_id()
+            platform, author_id, target_key, event.get_user_id(), force=force
         )
     if removed and target_removed:
         await UniMessage(f"已取消 {label} 的订阅。").send(target=target, bot=bot)
@@ -145,7 +169,7 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         )
     else:
         await UniMessage(
-            "本会话没有你的这个订阅。发送 爱播订阅列表 可查看当前订阅。"
+            f"「{label}」不是你订阅的，只有订阅人、群管理或机器人管理员可以取消。"
         ).send(target=target, bot=bot)
 
 
