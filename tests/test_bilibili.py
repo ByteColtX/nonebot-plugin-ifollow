@@ -1,9 +1,10 @@
 import hashlib
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import httpx
 import pytest
 
+from http_stub import Stub, install
 from nonebot_plugin_ifollow import bilibili_platform as bili
 from nonebot_plugin_ifollow.platforms import Cursor
 
@@ -69,72 +70,37 @@ async def test_resolve_author_from_short_video(
 async def test_resolve_short_link_uses_browser_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeResponse:
-        url = "https://www.bilibili.com/video/BV1AbcdefG12"
-
-        def raise_for_status(self) -> None:
-            return
-
-    class FakeClient:
-        kwargs: dict[str, Any]
-        requested_url: str
-
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-        async def __aenter__(self) -> "FakeClient":
-            FakeClient.kwargs = self.kwargs
-            return self
-
-        async def __aexit__(self, *_args: Any) -> None:
-            return
-
-        async def get(self, url: str) -> FakeResponse:
-            FakeClient.requested_url = url
-            return FakeResponse()
-
-    monkeypatch.setattr(bili.httpx, "AsyncClient", FakeClient)
+    stub = install(
+        monkeypatch,
+        Stub(
+            [
+                httpx.Response(
+                    302,
+                    headers={"location": "https://www.bilibili.com/video/BV1AbcdefG12"},
+                ),
+                httpx.Response(200, content=b"ok"),
+            ]
+        ),
+    )
 
     resolved = await bili._resolve_short_link("b23.tv/video")
 
     assert resolved.endswith("BV1AbcdefG12")
-    assert FakeClient.kwargs["headers"] == bili.BILIBILI_BROWSER_HEADERS
-    assert FakeClient.requested_url == "https://b23.tv/video"
+    assert (
+        stub.requests[0].headers["user-agent"]
+        == bili.BILIBILI_BROWSER_HEADERS["User-Agent"]
+    )
+    assert str(stub.requests[0].url) == "https://b23.tv/video"
 
 
-class FakeAppResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.payload = payload
+def app_response(payload: dict[str, Any]) -> httpx.Response:
+    """构造 APP 接口响应；带上 request 以便 raise_for_status 可用。"""
 
-    def raise_for_status(self) -> None:
-        return
-
-    def json(self) -> dict[str, Any]:
-        return self.payload
-
-
-class FakeAppClient:
-    responses: ClassVar[list[dict[str, Any]]] = []
-    requests: ClassVar[list[dict[str, Any]]] = []
-
-    def __init__(self, **_kwargs: Any) -> None:
-        pass
-
-    async def __aenter__(self) -> "FakeAppClient":
-        return self
-
-    async def __aexit__(self, *_args: Any) -> None:
-        return
-
-    async def get(
-        self, url: str, params: dict[str, str] | None = None
-    ) -> FakeAppResponse:
-        FakeAppClient.requests.append({"url": url, "params": params or {}})
-        index = min(
-            len(FakeAppClient.requests) - 1,
-            len(FakeAppClient.responses) - 1,
-        )
-        return FakeAppResponse(FakeAppClient.responses[index])
+    return httpx.Response(
+        200,
+        json=payload,
+        request=httpx.Request("GET", "https://app.bilibili.com/x/test"),
+    )
 
 
 class FakeUser:
@@ -156,11 +122,11 @@ class FakeUser:
 
 
 def use_app_responses(
-    monkeypatch: pytest.MonkeyPatch, *responses: dict[str, Any]
-) -> None:
-    FakeAppClient.responses = list(responses)
-    FakeAppClient.requests = []
-    monkeypatch.setattr(bili, "_app_client", lambda: FakeAppClient())
+    monkeypatch: pytest.MonkeyPatch, *payloads: dict[str, Any]
+) -> Stub:
+    """让 APP 接口按顺序返回这些 payload，并返回请求记录器。"""
+
+    return install(monkeypatch, Stub([app_response(payload) for payload in payloads]))
 
 
 def test_app_sign_matches_md5_of_sorted_params(
@@ -181,52 +147,44 @@ def test_app_sign_matches_md5_of_sorted_params(
 
 @pytest.mark.asyncio
 async def test_app_get_rotates_appkey_after_failure() -> None:
-    class RotatingClient:
-        calls = 0
+    stub = Stub(
+        [
+            app_response({"code": -400, "message": "请求错误"}),
+            app_response({"code": 0, "data": {"ok": True}}),
+        ]
+    )
 
-        async def get(
-            self, _url: str, params: dict[str, str] | None = None
-        ) -> FakeAppResponse:
-            RotatingClient.calls += 1
-            if RotatingClient.calls == 1:
-                return FakeAppResponse({"code": -400, "message": "请求错误"})
-            return FakeAppResponse({"code": 0, "data": {"ok": True}})
-
-    data = await bili._app_get(cast(httpx.AsyncClient, RotatingClient()), "/x/test", {})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(stub)) as client:
+        data = await bili._app_get(client, "/x/test", {})
 
     assert data == {"ok": True}
-    assert RotatingClient.calls == 2
+    assert len(stub.requests) == 2
 
 
 @pytest.mark.asyncio
 async def test_app_get_rejects_missing_data() -> None:
-    class BadClient:
-        async def get(
-            self, _url: str, params: dict[str, str] | None = None
-        ) -> FakeAppResponse:
-            return FakeAppResponse({"code": 0})
+    stub = Stub([app_response({"code": 0})])
 
-    with pytest.raises(bili.BilibiliRequestError):
-        await bili._app_get(cast(httpx.AsyncClient, BadClient()), "/x/test", {})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(stub)) as client:
+        with pytest.raises(bili.BilibiliRequestError):
+            await bili._app_get(client, "/x/test", {})
 
 
 @pytest.mark.asyncio
 async def test_app_get_marks_http_errors_retryable() -> None:
-    class FailingClient:
-        async def get(
-            self, _url: str, params: dict[str, str] | None = None
-        ) -> FakeAppResponse:
-            raise RuntimeError("HTTP 503")
+    def boom(_request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("HTTP 503")
 
-    with pytest.raises(bili.BilibiliRequestError) as exc_info:
-        await bili._app_get(cast(httpx.AsyncClient, FailingClient()), "/x/test", {})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
+        with pytest.raises(bili.BilibiliRequestError) as exc_info:
+            await bili._app_get(client, "/x/test", {})
 
     assert exc_info.value.retryable
 
 
 @pytest.mark.asyncio
 async def test_fetch_profile_prefers_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    use_app_responses(
+    stub = use_app_responses(
         monkeypatch,
         {
             "code": 0,
@@ -245,7 +203,7 @@ async def test_fetch_profile_prefers_app(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert profile.name == "作者"
     assert profile.description == "签名"
-    assert FakeAppClient.requests[0]["url"].endswith("/x/v2/space")
+    assert stub.requests[0].url.path == "/x/v2/space"
 
 
 @pytest.mark.asyncio
@@ -262,7 +220,7 @@ async def test_fetch_profile_falls_back_to_web(
 
 @pytest.mark.asyncio
 async def test_fetch_video_works_prefers_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    use_app_responses(
+    stub = use_app_responses(
         monkeypatch,
         {
             "code": 0,
@@ -286,14 +244,14 @@ async def test_fetch_video_works_prefers_app(monkeypatch: pytest.MonkeyPatch) ->
     assert [work.work_id for work in works] == ["BV1AbcdefG12"]
     assert works[0].author.author_id == "123"
     assert works[0].create_time == 200
-    assert FakeAppClient.requests[0]["params"]["vmid"] == "123"
+    assert stub.requests[0].url.params["vmid"] == "123"
 
 
 @pytest.mark.asyncio
 async def test_app_video_pagination_uses_last_aid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    use_app_responses(
+    stub = use_app_responses(
         monkeypatch,
         {
             "code": 0,
@@ -328,14 +286,14 @@ async def test_app_video_pagination_uses_last_aid(
     works = await bili.fetch_video_works("123", cursor=Cursor("BV1"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
-    assert FakeAppClient.requests[1]["params"]["aid"] == "100"
+    assert stub.requests[1].url.params["aid"] == "100"
 
 
 @pytest.mark.asyncio
 async def test_app_video_pagination_stops_at_cursor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    use_app_responses(
+    stub = use_app_responses(
         monkeypatch,
         {
             "code": 0,
@@ -352,7 +310,7 @@ async def test_app_video_pagination_stops_at_cursor(
     works = await bili.fetch_video_works("123", cursor=Cursor("BV99"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
-    assert len(FakeAppClient.requests) == 1
+    assert len(stub.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -554,7 +512,7 @@ async def test_app_video_works_omits_ps_and_stops_at_limit(
 ) -> None:
     """不再传分页条数；攒够补发上限后不再翻页。"""
 
-    use_app_responses(
+    stub = use_app_responses(
         monkeypatch,
         {
             "code": 0,
@@ -571,8 +529,8 @@ async def test_app_video_works_omits_ps_and_stops_at_limit(
     works = await bili.fetch_video_works("123", cursor=Cursor("BV1old"))
 
     assert len(works) == 5
-    assert len(FakeAppClient.requests) == 1
-    assert "ps" not in FakeAppClient.requests[0]["params"]
+    assert len(stub.requests) == 1
+    assert "ps" not in stub.requests[0].url.params
 
 
 @pytest.mark.asyncio
