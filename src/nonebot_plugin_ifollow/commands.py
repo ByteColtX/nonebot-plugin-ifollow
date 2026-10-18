@@ -140,17 +140,6 @@ def can_manage(event: Event) -> bool:
 _NOTICE_SUFFIX = " 发布了新作品"
 
 
-def _text_of(msg: Any) -> str:
-    """把 ``Message`` / ``str`` 统一成纯文本。"""
-
-    if msg is None:
-        return ""
-    if isinstance(msg, str):
-        return msg
-    extract = getattr(msg, "extract_plain_text", None)
-    return extract() if callable(extract) else str(msg)
-
-
 def _reply_text(reply: Any) -> str:
     """取出被引用消息的纯文本。
 
@@ -164,7 +153,9 @@ def _reply_text(reply: Any) -> str:
         纯文本；没有引用时返回空串。
     """
 
-    return _text_of(getattr(reply, "message", None))
+    if reply is None:
+        return ""
+    return reply.message.extract_plain_text()
 
 
 def quoted_author(reply: Any) -> tuple[str, str] | None:
@@ -187,11 +178,10 @@ def quoted_author(reply: Any) -> tuple[str, str] | None:
         if not line.endswith(_NOTICE_SUFFIX):
             continue
         head = line[: -len(_NOTICE_SUFFIX)].strip()
+        if not head:
+            continue
         platform_label, sep, name = head.partition(" · ")
-        if sep and name:
-            return platform_label, name
-        if head:
-            return "", head
+        return (platform_label, name) if sep and name else ("", head)
     return None
 
 
