@@ -2,7 +2,7 @@ default_install_hook_types: [pre-commit]
 ci:
   autofix_prs: true
   autofix_commit_msg: "chore: auto fix by pre-commit hooks"
-  autoupdate_branch: master
+  autoupdate_branch: main
   autoupdate_schedule: monthly
   autoupdate_commit_msg: "chore: auto update pre-commit hooks"
 repos:
@@ -14,7 +14,7 @@ repos:
       - id: ruff-format
 
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.28
+    rev: 0.13.0
     hooks:
       - id: uv-lock
       - id: uv-sync
