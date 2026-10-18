@@ -58,7 +58,10 @@ async def test_help_command_sends_help_message(
     await plugin.help_command(Mock(), Mock())
 
     assert FakeUniMessage.sent == [plugin.HELP_MESSAGE]
-    assert "爱播取消订阅 <序号或作者主页/作品链接>" in FakeUniMessage.sent[0]
+    assert (
+        "爱播取消订阅 <序号、作者 ID、昵称或作者主页/作品链接>"
+        in FakeUniMessage.sent[0]
+    )
 
 
 def test_target_subscriptions_preserve_list_order() -> None:
@@ -237,3 +240,72 @@ async def test_subscribe_records_cursor_with_publish_time(
         "video": Cursor("BV1", 100)
     }
     assert FakeUniMessage.sent[0].startswith("已订阅B站作者 作者。")
+
+
+def _subscription(
+    platform: str, author_id: str, name: str, handle: str
+) -> AuthorSubscription:
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    return AuthorSubscription(
+        platform,  # type: ignore[arg-type]
+        author_id,
+        name,
+        {target_key: TargetSubscription(target.dump())},
+        author_handle=handle,
+    )
+
+
+def test_match_subscription_uses_id_handle_and_url() -> None:
+    douyin = _subscription("douyin", "MS4wLjABAAAA-x", "小葵", "kui")
+    bili = _subscription("bilibili", "123", "呆呆丸", "123")
+    items = [douyin, bili]
+
+    assert plugin._match_subscription(items, "MS4wLjABAAAA-x") is douyin
+    assert plugin._match_subscription(items, "kui") is douyin
+    assert (
+        plugin._match_subscription(items, "https://www.douyin.com/user/MS4wLjABAAAA-x")
+        is douyin
+    )
+    assert plugin._match_subscription(items, "https://space.bilibili.com/123") is bili
+    assert plugin._match_subscription(items, "呆呆丸") is bili
+    assert plugin._match_subscription(items, "别人") is None
+
+
+def test_match_subscription_rejects_ambiguous_nickname() -> None:
+    """昵称重名时不猜，让用户改用序号。"""
+
+    first = _subscription("douyin", "a", "同名", "a")
+    second = _subscription("douyin", "b", "同名", "b")
+
+    assert plugin._match_subscription([first, second], "同名") is None
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_matches_local_id_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """按作者 ID 取消订阅不联网，作者注销或接口被风控也能取消。"""
+
+    store = SubscriptionStore(tmp_path)
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    await store.upsert_target(
+        "douyin", "MS4wLjABAAAA-x", "小葵", target_key, target.dump(), {}
+    )
+
+    async def boom(_value: str) -> None:
+        raise AssertionError("不应联网解析作者")
+
+    monkeypatch.setattr(plugin, "store", store)
+    monkeypatch.setattr(plugin, "resolve_author", boom)
+    monkeypatch.setattr(plugin, "UniMessage", FakeUniMessage)
+    monkeypatch.setattr(plugin, "get_target", lambda _event, _bot: target)
+    event = Mock()
+    event.get_user_id.return_value = "123"
+    args = SimpleNamespace(extract_plain_text=lambda: "MS4wLjABAAAA-x")
+
+    await plugin.unsubscribe(event, Mock(), args)
+
+    assert FakeUniMessage.sent == ["已取消订阅。"]
+    assert await store.snapshot() == {}
