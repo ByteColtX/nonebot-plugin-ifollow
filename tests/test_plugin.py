@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot_plugin_alconna.uniseg import Target
 
 from nonebot_plugin_ifollow import plugin
@@ -311,3 +312,95 @@ async def test_warm_up_on_startup_only_with_bilibili_authors(
     monkeypatch.setattr(plugin, "bilibili_dynamics_enabled", lambda: True)
     await plugin.warm_up_bilibili_on_startup()
     assert calls == [True]
+
+
+def test_is_permanent_target_error_detects_kicked_group() -> None:
+    kicked = ActionFailed(
+        retcode=1200,
+        message="发送消息失败 (code=110): 发送失败，你已被移出该群，请重新加群。",
+    )
+    missing = ActionFailed(retcode=100, message="群不存在")
+
+    assert plugin._is_permanent_target_error(kicked)
+    assert plugin._is_permanent_target_error(missing)
+    assert not plugin._is_permanent_target_error(RuntimeError("boom"))
+
+
+@pytest.mark.asyncio
+async def test_kicked_group_skips_target_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SubscriptionStore(tmp_path)
+    monkeypatch.setattr(plugin, "store", store)
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    await store.upsert_target(
+        "bilibili", "123", "作者", target_key, target.dump(), {"video": "old"}
+    )
+    author = AuthorSubscription(
+        "bilibili",
+        "123",
+        "作者",
+        {target_key: TargetSubscription(target.dump(), {"video": "old"})},
+    )
+    kicked = ActionFailed(
+        retcode=1200, message="发送失败，你已被移出该群，请重新加群。"
+    )
+    send = AsyncMock(side_effect=kicked)
+    monkeypatch.setattr(plugin, "_send_work", send)
+    plugin.send_retry_attempts.clear()
+    plugin.send_retry_until.clear()
+    plugin.permanent_target_warned.clear()
+
+    await plugin._deliver_new_works(
+        author,
+        target_key,
+        author.targets[target_key],
+        "video",
+        [make_work("new-2", timestamp=3), make_work("new-1", timestamp=2)],
+        set(),
+    )
+
+    assert send.await_count == 1
+    assert plugin.send_retry_until == {}
+    assert "group" in plugin.permanent_target_warned
+    assert (await store.snapshot())["bilibili:123"].targets[target_key].cursors[
+        "video"
+    ] == "old"
+
+
+@pytest.mark.asyncio
+async def test_transient_send_failure_backs_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SubscriptionStore(tmp_path)
+    monkeypatch.setattr(plugin, "store", store)
+    target = Target.group("group")
+    target_key = make_target_key(target.dump())
+    await store.upsert_target(
+        "bilibili", "123", "作者", target_key, target.dump(), {"video": "old"}
+    )
+    author = AuthorSubscription(
+        "bilibili",
+        "123",
+        "作者",
+        {target_key: TargetSubscription(target.dump(), {"video": "old"})},
+    )
+    monkeypatch.setattr(
+        plugin, "_send_work", AsyncMock(side_effect=RuntimeError("network"))
+    )
+    plugin.send_retry_attempts.clear()
+    plugin.send_retry_until.clear()
+
+    await plugin._deliver_new_works(
+        author,
+        target_key,
+        author.targets[target_key],
+        "video",
+        [make_work("new")],
+        set(),
+    )
+
+    assert list(plugin.send_retry_until) == [
+        ("bilibili", "123", target_key, "video", "new")
+    ]
