@@ -5,7 +5,8 @@ from nonebot.plugin import PluginMetadata
 
 require("nonebot_plugin_localstore")
 
-from .config import Config
+from .app import setup
+from .settings import Config
 
 __plugin_meta__ = PluginMetadata(
     name="爱播作者订阅",
@@ -21,6 +22,6 @@ __plugin_meta__ = PluginMetadata(
     extra={"author": "ByteColtX <umk@live.com>"},
 )
 
-from . import plugin as plugin
+setup()
 
-__all__ = ["plugin"]
+__all__ = ["__plugin_meta__"]

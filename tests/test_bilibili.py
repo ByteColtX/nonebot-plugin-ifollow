@@ -6,7 +6,16 @@ import pytest
 
 from http_stub import Stub, install
 from nonebot_plugin_ifollow import bilibili_platform as bili
+from nonebot_plugin_ifollow.errors import TransientError
 from nonebot_plugin_ifollow.platforms import Cursor
+from nonebot_plugin_ifollow.settings import Settings
+
+SETTINGS = Settings(
+    interval=1800,
+    max_items=5,
+    media_max_bytes=100 * 1024 * 1024,
+    use_base64=False,
+)
 
 
 def test_extract_bilibili_links() -> None:
@@ -33,15 +42,15 @@ async def test_resolve_author_from_short_profile(
     async def resolve_short_link(_value: str) -> str:
         return "https://m.bilibili.com/space/123"
 
-    async def fetch_profile(mid: str) -> bili.AuthorInfo:
+    async def fetch_profile(_settings: Settings, mid: str) -> bili.AuthorInfo:
         return bili.AuthorInfo(mid, "作者", mid)
 
     monkeypatch.setattr(bili, "_resolve_short_link", resolve_short_link)
     monkeypatch.setattr(bili, "fetch_author_profile", fetch_profile)
 
-    author = await bili.resolve_bilibili_author("b23.tv/profile")
+    resolved = await bili.resolve_author(SETTINGS, "b23.tv/profile")
 
-    assert author.author_id == "123"
+    assert resolved.author.author_id == "123"
 
 
 @pytest.mark.asyncio
@@ -61,9 +70,9 @@ async def test_resolve_author_from_short_video(
     monkeypatch.setattr(bili, "_resolve_short_link", resolve_short_link)
     monkeypatch.setattr(bili, "Video", FakeVideo)
 
-    author = await bili.resolve_bilibili_author("b23.tv/video")
+    resolved = await bili.resolve_author(SETTINGS, "b23.tv/video")
 
-    assert author.author_id == "123"
+    assert resolved.author.author_id == "123"
 
 
 @pytest.mark.asyncio
@@ -166,7 +175,7 @@ async def test_app_get_rejects_missing_data() -> None:
     stub = Stub([app_response({"code": 0})])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(stub)) as client:
-        with pytest.raises(bili.BilibiliRequestError):
+        with pytest.raises(TransientError):
             await bili._app_get(client, "/x/test", {})
 
 
@@ -176,10 +185,10 @@ async def test_app_get_marks_http_errors_retryable() -> None:
         raise RuntimeError("HTTP 503")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
-        with pytest.raises(bili.BilibiliRequestError) as exc_info:
+        with pytest.raises(TransientError) as exc_info:
             await bili._app_get(client, "/x/test", {})
 
-    assert exc_info.value.retryable
+    assert isinstance(exc_info.value, TransientError)
 
 
 @pytest.mark.asyncio
@@ -199,7 +208,7 @@ async def test_fetch_profile_prefers_app(monkeypatch: pytest.MonkeyPatch) -> Non
         },
     )
 
-    profile = await bili.fetch_author_profile("123")
+    profile = await bili.fetch_author_profile(SETTINGS, "123")
 
     assert profile.name == "作者"
     assert profile.description == "签名"
@@ -213,7 +222,7 @@ async def test_fetch_profile_falls_back_to_web(
     use_app_responses(monkeypatch, {"code": -400, "message": "请求错误"})
     monkeypatch.setattr(bili, "User", FakeUser)
 
-    profile = await bili.fetch_author_profile("123")
+    profile = await bili.fetch_author_profile(SETTINGS, "123")
 
     assert profile.name == "作者"
 
@@ -239,7 +248,7 @@ async def test_fetch_video_works_prefers_app(monkeypatch: pytest.MonkeyPatch) ->
         },
     )
 
-    works = await bili.fetch_video_works("123")
+    works = await bili.fetch(SETTINGS, "123", "video", None)
 
     assert [work.work_id for work in works] == ["BV1AbcdefG12"]
     assert works[0].author.author_id == "123"
@@ -283,7 +292,7 @@ async def test_app_video_pagination_uses_last_aid(
         },
     )
 
-    works = await bili.fetch_video_works("123", cursor=Cursor("BV1"))
+    works = await bili.fetch(SETTINGS, "123", "video", Cursor("BV1"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
     assert stub.requests[1].url.params["aid"] == "100"
@@ -307,7 +316,7 @@ async def test_app_video_pagination_stops_at_cursor(
         },
     )
 
-    works = await bili.fetch_video_works("123", cursor=Cursor("BV99"))
+    works = await bili.fetch(SETTINGS, "123", "video", Cursor("BV99"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
     assert len(stub.requests) == 1
@@ -324,7 +333,7 @@ async def test_empty_app_video_list_does_not_fall_back(
 
     monkeypatch.setattr(bili, "User", fail_user)
 
-    assert await bili.fetch_video_works("123") == []
+    assert await bili.fetch(SETTINGS, "123", "video", None) == []
 
 
 @pytest.mark.asyncio
@@ -349,7 +358,7 @@ async def test_fetch_video_works_falls_back_to_web(
     ]
     monkeypatch.setattr(bili, "User", FakeUser)
 
-    works = await bili.fetch_video_works("123")
+    works = await bili.fetch(SETTINGS, "123", "video", None)
 
     assert works[0].work_id == "BV1AbcdefG12"
     assert works[0].author.author_id == "123"
@@ -403,7 +412,7 @@ async def test_video_pagination_uses_last_aid_on_web_fallback(
 
     monkeypatch.setattr(bili, "User", make_user)
 
-    works = await bili.fetch_video_works("123", cursor=Cursor("BV99"))
+    works = await bili.fetch(SETTINGS, "123", "video", Cursor("BV99"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
     assert instances[0].calls[1]["oid"] == 100
@@ -446,7 +455,7 @@ async def test_dynamic_mapping_and_bvid(monkeypatch: pytest.MonkeyPatch) -> None
     }
     monkeypatch.setattr(bili, "User", FakeUser)
 
-    works = await bili.fetch_dynamic_works("123")
+    works = await bili.fetch(SETTINGS, "123", "dynamic", None)
 
     assert works[0].bvid == "BV1AbcdefG12"
     assert works[0].kind == "video"
@@ -466,20 +475,21 @@ async def test_bilibili_errors_mark_412_retryable(
 
     monkeypatch.setattr(bili, "User", FailingUser)
 
-    with pytest.raises(bili.BilibiliRequestError) as exc_info:
-        await bili.fetch_video_works("123")
+    with pytest.raises(TransientError) as exc_info:
+        await bili.fetch(SETTINGS, "123", "video", None)
 
-    assert exc_info.value.retryable
+    assert isinstance(exc_info.value, TransientError)
 
 
-def test_dynamics_enabled_only_with_cookie(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(bili.config, "ifollow_bilibili_cookie", None)
-    assert not bili.bilibili_dynamics_enabled()
-
-    monkeypatch.setattr(bili.config, "ifollow_bilibili_cookie", "SESSDATA=x")
-    assert bili.bilibili_dynamics_enabled()
+def test_dynamics_enabled_only_with_cookie() -> None:
+    assert not SETTINGS.dynamics_enabled
+    assert Settings(
+        interval=1800,
+        max_items=5,
+        media_max_bytes=0,
+        use_base64=False,
+        bilibili_cookie="SESSDATA=x",
+    ).dynamics_enabled
 
 
 @pytest.mark.asyncio
@@ -489,7 +499,7 @@ async def test_warm_up_swallows_failures(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(bili, "get_buvid", fail)
 
-    await bili.warm_up_bilibili()
+    await bili.warm_up()
 
 
 @pytest.mark.asyncio
@@ -501,7 +511,7 @@ async def test_warm_up_calls_buvid(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(bili, "get_buvid", ok)
 
-    await bili.warm_up_bilibili()
+    await bili.warm_up()
 
     assert calls == [True]
 
@@ -526,7 +536,7 @@ async def test_app_video_works_omits_ps_and_stops_at_limit(
         },
     )
 
-    works = await bili.fetch_video_works("123", cursor=Cursor("BV1old"))
+    works = await bili.fetch(SETTINGS, "123", "video", Cursor("BV1old"))
 
     assert len(works) == 5
     assert len(stub.requests) == 1
@@ -557,6 +567,109 @@ async def test_web_fallback_ignores_non_dict_last_item(
     ]
     monkeypatch.setattr(bili, "User", FakeUser)
 
-    works = await bili.fetch_video_works("123")
+    works = await bili.fetch(SETTINGS, "123", "video", None)
 
     assert [work.work_id for work in works] == ["BV1AbcdefG12"]
+
+
+@pytest.mark.asyncio
+async def test_web_video_fallback_pages_through_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """APP 失败后网页接口按 aid 翻页，直到平台说没有更多。"""
+
+    use_app_responses(monkeypatch, {"code": -400, "message": "请求错误"})
+    FakeUser.pages = [
+        {
+            "media_list": [
+                {"id": 200, "bv_id": "BV200", "title": "新", "pubtime": 200}
+            ],
+            "has_more": True,
+        },
+        {
+            "media_list": [
+                {"id": 100, "bv_id": "BV100", "title": "旧", "pubtime": 100}
+            ],
+            "has_more": False,
+        },
+    ]
+    monkeypatch.setattr(bili, "User", FakeUser)
+
+    works = await bili.fetch(SETTINGS, "123", "video", Cursor("old", 1))
+
+    assert [work.work_id for work in works] == ["BV200", "BV100"]
+
+
+@pytest.mark.asyncio
+async def test_dynamics_are_mapped_from_web_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeUser.dynamic_result = {
+        "items": [
+            {
+                "id_str": "777",
+                "modules": {
+                    "module_author": {"mid": 123, "name": "作者", "pub_ts": 500},
+                    "module_dynamic": {
+                        "major": {
+                            "opus": {
+                                "jump_url": "//www.bilibili.com/opus/777",
+                                "title": "动态标题",
+                                "summary": {"text": "动态正文"},
+                            }
+                        }
+                    },
+                },
+            }
+        ],
+        "has_more": False,
+        "offset": "",
+    }
+    monkeypatch.setattr(bili, "User", FakeUser)
+
+    works = await bili.fetch(SETTINGS, "123", "dynamic", None)
+
+    assert works[0].kind == "dynamic"
+    assert works[0].url == "https://www.bilibili.com/opus/777"
+    assert works[0].description == "动态正文"
+
+
+@pytest.mark.asyncio
+async def test_resolve_author_from_bv_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeVideo:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def get_info(self) -> dict[str, Any]:
+            return {"owner": {"mid": 123}}
+
+    async def profile(_settings: Settings, mid: str) -> bili.AuthorInfo:
+        return bili.AuthorInfo(mid, "作者", mid)
+
+    async def fetch(
+        _settings: Settings, _mid: str, _feed: str, _cursor: Cursor | None = None
+    ) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(bili, "Video", FakeVideo)
+    monkeypatch.setattr(bili, "fetch_author_profile", profile)
+    monkeypatch.setattr(bili, "fetch", fetch)
+
+    resolved = await bili.resolve_author(
+        SETTINGS, "https://www.bilibili.com/video/BV1AbcdefG12"
+    )
+
+    assert resolved.author.author_id == "123"
+
+
+@pytest.mark.asyncio
+async def test_resolve_author_rejects_unknown_link() -> None:
+    with pytest.raises(ValueError, match="BV/AV"):
+        await bili.resolve_author(SETTINGS, "https://www.bilibili.com/read/1")
+
+
+def test_parse_cookie_splits_pairs() -> None:
+    assert bili._parse_cookie("SESSDATA=a; bili_jct=b") == {
+        "SESSDATA": "a",
+        "bili_jct": "b",
+    }

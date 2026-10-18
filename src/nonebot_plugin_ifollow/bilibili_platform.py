@@ -1,4 +1,4 @@
-"""B 站作者投稿和动态接口适配。"""
+"""B 站作者资料、投稿与动态接口适配。"""
 
 from __future__ import annotations
 
@@ -14,13 +14,16 @@ from bilibili_api.utils.network import get_buvid
 from bilibili_api.video import Video
 from nonebot import logger
 
-from .config import config
+from .errors import PermanentError, TransientError
+from .pagination import Page, paginate
 from .platforms import (
     AuthorInfo,
     Cursor,
+    FeedKind,
     PlatformWork,
-    page_reaches_cursor,
+    ResolvedAuthor,
 )
+from .settings import Settings
 
 PROFILE_RE = re.compile(
     r"(?:https?://)?(?:(?:www\.)?space\.bilibili\.com/|m\.bilibili\.com/space/)"
@@ -49,29 +52,310 @@ BILIBILI_APP_HEADERS = {
     ),
 }
 JOINT_CREATION_SUFFIX = " 等联合创作"
+PERMANENT_APP_CODES = frozenset({-404, 62002, 62012})
+"""APP 接口表示作者/内容不存在或不可见的返回码。"""
+
+platform = "bilibili"
 
 
-class BilibiliRequestError(RuntimeError):
-    """B 站接口不可用或返回了无法识别的数据。"""
+def matches(value: str) -> bool:
+    """判断输入是否属于 B 站。"""
 
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
-        super().__init__(message)
-        self.retryable = retryable
+    return value.strip().isdigit() or is_bilibili_value(value)
 
 
-def bilibili_dynamics_enabled() -> bool:
-    """动态接口匿名不稳定，仅在配置 B 站 Cookie 时轮询。"""
+def feeds(settings: Settings) -> tuple[FeedKind, ...]:
+    """返回本平台要轮询的 feed；动态只在配置 Cookie 后启用。"""
 
-    return bool(config.ifollow_bilibili_cookie)
+    if settings.dynamics_enabled:
+        return ("video", "dynamic")
+    return ("video",)
 
 
-async def warm_up_bilibili() -> None:
+def extract_bilibili_mid(value: str) -> str | None:
+    """从 B 站作者主页中提取 UID。"""
+
+    value = value.strip().strip("<>[]()")
+    matched = PROFILE_RE.search(value)
+    return matched.group("mid") if matched else None
+
+
+def extract_bilibili_video(value: str) -> tuple[str, str] | None:
+    """从 BV/AV 链接中提取视频标识。"""
+
+    if matched := BV_RE.search(value):
+        return "bvid", matched.group("bvid")
+    if matched := AV_RE.search(value):
+        return "avid", matched.group("avid")
+    return None
+
+
+def is_bilibili_value(value: str) -> bool:
+    """判断输入是否明显属于 B 站。"""
+
+    return bool(
+        extract_bilibili_mid(value)
+        or extract_bilibili_video(value)
+        or SHORT_LINK_RE.search(value)
+        or "bilibili.com" in value
+        or "b23.tv" in value
+    )
+
+
+async def warm_up() -> None:
     """预热 B 站匿名 buvid3/buvid4，失败不影响后续请求。"""
 
     try:
         await get_buvid()
     except Exception:
         logger.opt(exception=True).warning("B 站 buvid3 预热失败，后续请求将按需重试")
+
+
+async def resolve_author(settings: Settings, value: str) -> ResolvedAuthor:
+    """解析作者主页或视频链接，并返回首页内容用于初始化游标。"""
+
+    mid = extract_bilibili_mid(value)
+    if mid is None and value.strip().isdigit():
+        mid = value.strip()
+    if mid is None:
+        mid = await _author_id_from_video(settings, value)
+    author = await fetch_author_profile(settings, mid)
+    feeds: dict[FeedKind, list[PlatformWork]] = {}
+    video = await fetch(settings, mid, "video", None)
+    feeds["video"] = video
+    if settings.dynamics_enabled:
+        try:
+            feeds["dynamic"] = await fetch(settings, mid, "dynamic", None)
+        except TransientError as exc:
+            logger.warning(f"B 站动态首页拉取失败，订阅时跳过动态：{exc}")
+    latest = max(
+        (work for works in feeds.values() for work in works),
+        key=lambda work: work.order,
+        default=None,
+    )
+    return ResolvedAuthor(latest.author if latest else author, feeds)
+
+
+async def _author_id_from_video(settings: Settings, value: str) -> str:
+    """从 BV/AV 链接或短链解析出作者 UID。"""
+
+    video = extract_bilibili_video(value)
+    if video is None and SHORT_LINK_RE.search(value):
+        value = await _resolve_short_link(value)
+        mid = extract_bilibili_mid(value)
+        if mid:
+            return mid
+        video = extract_bilibili_video(value)
+    if video is None:
+        raise ValueError("请输入 B 站作者主页、BV/AV 视频链接或 b23.tv 短链")
+    kind, identifier = video
+    try:
+        info = await Video(
+            bvid=identifier if kind == "bvid" else None,
+            aid=int(identifier) if kind == "avid" else None,
+            credential=_credential(settings),
+        ).get_info()
+    except Exception as exc:
+        raise _wrap_error("B 站作品详情请求失败", exc) from exc
+    owner = info.get("owner")
+    if not isinstance(owner, dict) or not owner.get("mid"):
+        raise TransientError("B 站作品详情缺少作者信息")
+    return str(owner["mid"])
+
+
+async def _resolve_short_link(value: str) -> str:
+    """解析 b23.tv 短链。"""
+
+    matched = SHORT_LINK_RE.search(value)
+    if matched is None:
+        return value
+    short_url = matched.group(0)
+    if not short_url.startswith(("http://", "https://")):
+        short_url = f"https://{short_url}"
+    try:
+        async with httpx.AsyncClient(
+            headers=BILIBILI_BROWSER_HEADERS, follow_redirects=True, timeout=20
+        ) as client:
+            response = await client.get(short_url)
+            response.raise_for_status()
+            return str(response.url)
+    except Exception as exc:
+        raise _wrap_error("B 站短链解析失败", exc) from exc
+
+
+async def fetch_author_profile(settings: Settings, mid: str) -> AuthorInfo:
+    """获取 B 站作者资料，优先使用匿名可用的 APP 接口。"""
+
+    try:
+        return await _fetch_author_profile_app(mid)
+    except TransientError as exc:
+        logger.warning(f"B 站 APP 作者资料接口失败，回退网页接口：{exc}")
+    return await _fetch_author_profile_web(settings, mid)
+
+
+async def _fetch_author_profile_app(mid: str) -> AuthorInfo:
+    """通过 APP 接口获取 B 站作者资料。"""
+
+    async with _app_client() as client:
+        data = await _app_get(client, "/x/v2/space", {"vmid": mid})
+    card = data.get("card")
+    if not isinstance(card, dict) or not card.get("mid"):
+        raise TransientError("B 站 APP 作者资料返回格式异常")
+    return AuthorInfo(
+        author_id=str(card["mid"]),
+        name=str(card.get("name") or card["mid"]),
+        handle=str(card.get("mid") or ""),
+        avatar=str(card.get("face") or ""),
+        description=str(card.get("sign") or ""),
+    )
+
+
+async def _fetch_author_profile_web(settings: Settings, mid: str) -> AuthorInfo:
+    """通过网页接口获取 B 站作者资料。"""
+
+    try:
+        info = await User(int(mid), credential=_credential(settings)).get_user_info()
+    except Exception as exc:
+        raise _wrap_error("B 站作者资料请求失败", exc) from exc
+    if not isinstance(info, dict) or not info.get("mid"):
+        raise TransientError("B 站作者资料返回格式异常")
+    return AuthorInfo(
+        author_id=str(info["mid"]),
+        name=str(info.get("name") or info["mid"]),
+        handle=str(info.get("mid") or ""),
+        avatar=str(info.get("face") or ""),
+        description=str(info.get("sign") or ""),
+    )
+
+
+async def fetch(
+    settings: Settings,
+    author_id: str,
+    feed: FeedKind,
+    cursor: Cursor | None = None,
+) -> list[PlatformWork]:
+    """读取作者视频投稿或动态，返回从新到旧的列表。
+
+    Args:
+        settings: 运行期配置。
+        author_id: 作者 UID。
+        feed: ``video`` 或 ``dynamic``。
+        cursor: 目标当前的游标，``None`` 表示首次订阅。
+
+    Returns:
+        从新到旧排列的作品列表。
+    """
+
+    if feed == "video":
+        try:
+            return await _fetch_video_app(settings, author_id, cursor)
+        except TransientError as exc:
+            logger.warning(f"B 站 APP 投稿接口失败，回退网页接口：{exc}")
+        return await _fetch_video_web(settings, author_id, cursor)
+    if feed == "dynamic":
+        return await _fetch_dynamics(settings, author_id, cursor)
+    return []
+
+
+async def _fetch_video_app(
+    settings: Settings, mid: str, cursor: Cursor | None
+) -> list[PlatformWork]:
+    """通过 APP 接口读取视频投稿。"""
+
+    async with _app_client() as client:
+
+        async def fetch_page(token: str | None) -> Page:
+            params = {"vmid": mid, "order": "pubdate"}
+            if token:
+                params["aid"] = token
+            data = await _app_get(client, "/x/v2/space/archive/cursor", params)
+            items = data.get("item") or []
+            if not isinstance(items, list):
+                raise TransientError("B 站 APP 投稿列表缺少 item")
+            works = [
+                work
+                for item in items
+                if (work := _parse_app_video_item(item, mid)) is not None
+            ]
+            last_item = items[-1] if items and isinstance(items[-1], dict) else {}
+            last_aid = last_item.get("param")
+            return Page(
+                works=works,
+                next_token=str(last_aid) if last_aid else None,
+                has_more=bool(data.get("has_next")),
+            )
+
+        return await paginate(fetch_page, cursor=cursor, limit=settings.max_items)
+
+
+async def _fetch_video_web(
+    settings: Settings, mid: str, cursor: Cursor | None
+) -> list[PlatformWork]:
+    """通过网页接口读取视频投稿。"""
+
+    user = User(int(mid), credential=_credential(settings))
+    author: AuthorInfo | None = None
+
+    async def fetch_page(token: str | None) -> Page:
+        nonlocal author
+        try:
+            result = await user.get_media_list(
+                oid=int(token) if token else None,
+                direction=False,
+                desc=True,
+                with_current=False,
+            )
+        except Exception as exc:
+            raise _wrap_error("B 站投稿列表请求失败", exc) from exc
+        if not isinstance(result, dict):
+            raise TransientError("B 站投稿列表返回格式异常")
+        items = result.get("media_list") or []
+        if not isinstance(items, list):
+            raise TransientError("B 站投稿列表缺少 media_list")
+        works: list[PlatformWork] = []
+        for item in items:
+            work = _parse_video_item(item, mid, author)
+            if work is None:
+                continue
+            author = work.author
+            works.append(work)
+        last_item = items[-1] if items and isinstance(items[-1], dict) else {}
+        last_aid = last_item.get("id")
+        return Page(
+            works=works,
+            next_token=str(last_aid) if last_aid else None,
+            has_more=bool(result.get("has_more")),
+        )
+
+    return await paginate(fetch_page, cursor=cursor, limit=settings.max_items)
+
+
+async def _fetch_dynamics(
+    settings: Settings, mid: str, cursor: Cursor | None
+) -> list[PlatformWork]:
+    """通过网页接口读取作者动态。"""
+
+    user = User(int(mid), credential=_credential(settings))
+
+    async def fetch_page(token: str | None) -> Page:
+        try:
+            result = await user.get_dynamics_new(offset=token or "")
+        except Exception as exc:
+            raise _wrap_error("B 站动态列表请求失败", exc) from exc
+        if not isinstance(result, dict):
+            raise TransientError("B 站动态列表返回格式异常")
+        items = result.get("items") or []
+        if not isinstance(items, list):
+            raise TransientError("B 站动态列表缺少 items")
+        works = [work for item in items if (work := _parse_dynamic_item(item, mid))]
+        next_offset = str(result.get("offset") or "")
+        return Page(
+            works=works,
+            next_token=next_offset or None,
+            has_more=bool(result.get("has_more")),
+        )
+
+    return await paginate(fetch_page, cursor=cursor, limit=settings.max_items)
 
 
 def _sign_app_params(
@@ -116,211 +400,26 @@ async def _app_get(
             last_error = exc
             continue
         if not isinstance(payload, dict):
-            last_error = BilibiliRequestError("B 站 APP 接口返回格式异常")
+            last_error = TransientError("B 站 APP 接口返回格式异常")
             continue
         code = payload.get("code")
         if code != 0:
-            last_error = BilibiliRequestError(
-                f"B 站 APP 接口返回 {code}：{payload.get('message') or ''}",
-                retryable=code in (-500, -503, -509, -799),
+            if code in PERMANENT_APP_CODES:
+                raise PermanentError(
+                    f"B 站 APP 接口返回 {code}：{payload.get('message') or ''}"
+                )
+            last_error = TransientError(
+                f"B 站 APP 接口返回 {code}：{payload.get('message') or ''}"
             )
             continue
         data = payload.get("data")
         if not isinstance(data, dict):
-            last_error = BilibiliRequestError("B 站 APP 接口缺少 data")
+            last_error = TransientError("B 站 APP 接口缺少 data")
             continue
         return data
-    if isinstance(last_error, BilibiliRequestError):
+    if isinstance(last_error, TransientError):
         raise last_error
     raise _wrap_error("B 站 APP 接口请求失败", last_error or RuntimeError("未知错误"))
-
-
-def extract_bilibili_mid(value: str) -> str | None:
-    """从 B 站作者主页中提取 UID。"""
-
-    value = value.strip().strip("<>[]()")
-    matched = PROFILE_RE.search(value)
-    return matched.group("mid") if matched else None
-
-
-def extract_bilibili_video(value: str) -> tuple[str, str] | None:
-    """从 BV/AV 链接中提取视频标识。"""
-
-    if matched := BV_RE.search(value):
-        return "bvid", matched.group("bvid")
-    if matched := AV_RE.search(value):
-        return "avid", matched.group("avid")
-    return None
-
-
-def is_bilibili_value(value: str) -> bool:
-    """判断输入是否明显属于 B 站。"""
-
-    return bool(
-        extract_bilibili_mid(value)
-        or extract_bilibili_video(value)
-        or SHORT_LINK_RE.search(value)
-        or "bilibili.com" in value
-        or "b23.tv" in value
-    )
-
-
-async def resolve_bilibili_author(value: str) -> AuthorInfo:
-    """解析 B 站作者主页或视频链接，返回作者资料。"""
-
-    mid = extract_bilibili_mid(value)
-    if mid:
-        return await fetch_author_profile(mid)
-
-    video = extract_bilibili_video(value)
-    if video is None and SHORT_LINK_RE.search(value):
-        value = await _resolve_short_link(value)
-        mid = extract_bilibili_mid(value)
-        if mid:
-            return await fetch_author_profile(mid)
-        video = extract_bilibili_video(value)
-    if video is None:
-        raise ValueError("请输入 B 站作者主页、BV/AV 视频链接或 b23.tv 短链")
-
-    try:
-        kind, identifier = video
-        bili_video = Video(
-            bvid=identifier if kind == "bvid" else None,
-            aid=int(identifier) if kind == "avid" else None,
-            credential=_credential(),
-        )
-        info = await bili_video.get_info()
-    except Exception as exc:
-        raise _wrap_error("B 站作品详情请求失败", exc) from exc
-    owner = info.get("owner")
-    if not isinstance(owner, dict) or not owner.get("mid"):
-        raise BilibiliRequestError("B 站作品详情缺少作者信息")
-    return AuthorInfo(
-        author_id=str(owner["mid"]),
-        name=str(owner.get("name") or owner["mid"]),
-        handle=str(owner["mid"]),
-        avatar=str(owner.get("face") or ""),
-    )
-
-
-async def _resolve_short_link(value: str) -> str:
-    """解析 b23.tv 短链。"""
-
-    matched = SHORT_LINK_RE.search(value)
-    if matched is None:
-        return value
-    short_url = matched.group(0)
-    if not short_url.startswith(("http://", "https://")):
-        short_url = f"https://{short_url}"
-    try:
-        async with httpx.AsyncClient(
-            headers=BILIBILI_BROWSER_HEADERS,
-            follow_redirects=True,
-            timeout=20,
-        ) as client:
-            response = await client.get(short_url)
-            response.raise_for_status()
-            return str(response.url)
-    except Exception as exc:
-        raise _wrap_error("B 站短链解析失败", exc) from exc
-
-
-async def fetch_author_profile(mid: str) -> AuthorInfo:
-    """获取 B 站作者资料，优先使用匿名可用的 APP 接口。"""
-
-    try:
-        return await _fetch_author_profile_app(mid)
-    except BilibiliRequestError as exc:
-        logger.warning(f"B 站 APP 作者资料接口失败，回退网页接口：{exc}")
-    return await _fetch_author_profile_web(mid)
-
-
-async def _fetch_author_profile_app(mid: str) -> AuthorInfo:
-    """通过 APP 接口获取 B 站作者资料。"""
-
-    async with _app_client() as client:
-        data = await _app_get(client, "/x/v2/space", {"vmid": mid})
-    card = data.get("card")
-    if not isinstance(card, dict) or not card.get("mid"):
-        raise BilibiliRequestError("B 站 APP 作者资料返回格式异常")
-    return AuthorInfo(
-        author_id=str(card["mid"]),
-        name=str(card.get("name") or card["mid"]),
-        handle=str(card.get("mid") or ""),
-        avatar=str(card.get("face") or ""),
-        description=str(card.get("sign") or ""),
-    )
-
-
-async def _fetch_author_profile_web(mid: str) -> AuthorInfo:
-    """通过网页接口获取 B 站作者资料。"""
-
-    try:
-        info = await User(int(mid), credential=_credential()).get_user_info()
-    except Exception as exc:
-        raise _wrap_error("B 站作者资料请求失败", exc) from exc
-    if not isinstance(info, dict) or not info.get("mid"):
-        raise BilibiliRequestError("B 站作者资料返回格式异常")
-    return AuthorInfo(
-        author_id=str(info["mid"]),
-        name=str(info.get("name") or info["mid"]),
-        handle=str(info.get("mid") or ""),
-        avatar=str(info.get("face") or ""),
-        description=str(info.get("sign") or ""),
-    )
-
-
-async def fetch_video_works(
-    mid: str, cursor: Cursor | None = None
-) -> list[PlatformWork]:
-    """读取 B 站作者视频投稿，返回从新到旧的列表。"""
-
-    try:
-        return await _fetch_video_works_app(mid, cursor)
-    except BilibiliRequestError as exc:
-        logger.warning(f"B 站 APP 投稿接口失败，回退网页接口：{exc}")
-    return await _fetch_video_works_web(mid, cursor)
-
-
-async def _fetch_video_works_app(
-    mid: str, cursor: Cursor | None = None
-) -> list[PlatformWork]:
-    """通过 APP 接口读取 B 站作者视频投稿。"""
-
-    works: list[PlatformWork] = []
-    seen: set[str] = set()
-    aid: int | None = None
-    limit = config.ifollow_sub_max_items
-    async with _app_client() as client:
-        while True:
-            params = {"vmid": mid, "order": "pubdate"}
-            if aid is not None:
-                params["aid"] = str(aid)
-            data = await _app_get(client, "/x/v2/space/archive/cursor", params)
-            items = data.get("item") or []
-            if not isinstance(items, list):
-                raise BilibiliRequestError("B 站 APP 投稿列表缺少 item")
-            page: list[PlatformWork] = []
-            for item in items:
-                work = _parse_app_video_item(item, mid)
-                if work is None or work.work_id in seen:
-                    continue
-                seen.add(work.work_id)
-                page.append(work)
-            works.extend(page)
-            if not page or not data.get("has_next"):
-                break
-            if cursor is None or len(works) >= limit:
-                break
-            if page_reaches_cursor(page, cursor):
-                break
-            last_item = items[-1] if isinstance(items[-1], dict) else {}
-            last_aid = last_item.get("param")
-            if not last_aid:
-                break
-            aid = int(last_aid)
-    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
-    return works
 
 
 def _parse_app_video_item(item: Any, mid: str) -> PlatformWork | None:
@@ -346,57 +445,11 @@ def _parse_app_video_item(item: Any, mid: str) -> PlatformWork | None:
     )
 
 
-async def _fetch_video_works_web(
-    mid: str, cursor: Cursor | None = None
-) -> list[PlatformWork]:
-    """通过网页接口读取 B 站作者视频投稿。"""
-
-    user = User(int(mid), credential=_credential())
-    works: list[PlatformWork] = []
-    oid: int | None = None
-    author: AuthorInfo | None = None
-    limit = config.ifollow_sub_max_items
-    while True:
-        try:
-            result = await user.get_media_list(
-                oid=oid,
-                direction=False,
-                desc=True,
-                with_current=False,
-            )
-        except Exception as exc:
-            raise _wrap_error("B 站投稿列表请求失败", exc) from exc
-        if not isinstance(result, dict):
-            raise BilibiliRequestError("B 站投稿列表返回格式异常")
-        items = result.get("media_list") or []
-        if not isinstance(items, list):
-            raise BilibiliRequestError("B 站投稿列表缺少 media_list")
-        page: list[PlatformWork] = []
-        for item in items:
-            work = _parse_video_item(item, mid, author)
-            if work is None:
-                continue
-            author = work.author
-            page.append(work)
-        works.extend(page)
-        if not page or not result.get("has_more"):
-            break
-        if cursor is None or len(works) >= limit:
-            break
-        if page_reaches_cursor(page, cursor):
-            break
-        last_item = items[-1] if isinstance(items[-1], dict) else {}
-        last_aid = last_item.get("id")
-        if not last_aid:
-            break
-        oid = int(last_aid)
-    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
-    return works
-
-
 def _parse_video_item(
     item: Any, mid: str, author: AuthorInfo | None
 ) -> PlatformWork | None:
+    """把网页投稿条目转换为统一作品模型。"""
+
     if not isinstance(item, dict):
         return None
     bvid = str(item.get("bv_id") or "")
@@ -424,42 +477,9 @@ def _parse_video_item(
     )
 
 
-async def fetch_dynamic_works(
-    mid: str, cursor: Cursor | None = None
-) -> list[PlatformWork]:
-    """读取 B 站作者动态，返回从新到旧的列表。"""
-
-    user = User(int(mid), credential=_credential())
-    works: list[PlatformWork] = []
-    offset = ""
-    limit = config.ifollow_sub_max_items
-    while True:
-        try:
-            result = await user.get_dynamics_new(offset=offset)
-        except Exception as exc:
-            raise _wrap_error("B 站动态列表请求失败", exc) from exc
-        if not isinstance(result, dict):
-            raise BilibiliRequestError("B 站动态列表返回格式异常")
-        items = result.get("items") or []
-        if not isinstance(items, list):
-            raise BilibiliRequestError("B 站动态列表缺少 items")
-        page = [work for item in items if (work := _parse_dynamic_item(item, mid))]
-        works.extend(page)
-        if not page or not result.get("has_more"):
-            break
-        if cursor is None or len(works) >= limit:
-            break
-        if page_reaches_cursor(page, cursor):
-            break
-        next_offset = str(result.get("offset") or "")
-        if not next_offset or next_offset == offset:
-            break
-        offset = next_offset
-    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
-    return works
-
-
 def _parse_dynamic_item(item: Any, mid: str) -> PlatformWork | None:
+    """把动态条目转换为统一作品模型。"""
+
     if not isinstance(item, dict):
         return None
     dynamic_id = str(item.get("id_str") or "")
@@ -525,14 +545,18 @@ def _parse_dynamic_item(item: Any, mid: str) -> PlatformWork | None:
     )
 
 
-def _credential() -> Credential | None:
-    raw_cookie = config.ifollow_bilibili_cookie
+def _credential(settings: Settings) -> Credential | None:
+    """按配置构造 bilibili-api 凭证。"""
+
+    raw_cookie = settings.bilibili_cookie
     if not raw_cookie:
         return None
     return Credential.from_cookies(_parse_cookie(raw_cookie))
 
 
 def _parse_cookie(raw_cookie: str) -> dict[str, str]:
+    """把 Cookie 请求头解析成键值字典。"""
+
     cookies: dict[str, str] = {}
     for item in raw_cookie.split(";"):
         name, separator, value = item.strip().partition("=")
@@ -541,10 +565,7 @@ def _parse_cookie(raw_cookie: str) -> dict[str, str]:
     return cookies
 
 
-def _wrap_error(prefix: str, exc: Exception) -> BilibiliRequestError:
-    message = f"{prefix}：{exc}"
-    text = str(exc)
-    retryable = any(
-        code in text for code in ("HTTP 412", "403", "429", "500", "502", "503", "504")
-    )
-    return BilibiliRequestError(message, retryable=retryable)
+def _wrap_error(prefix: str, exc: Exception) -> TransientError:
+    """把 bilibili-api 的异常包装成统一的可重试错误。"""
+
+    return TransientError(f"{prefix}：{exc}")

@@ -1,24 +1,28 @@
-"""爱播订阅数据模型和 JSON 持久化。"""
+"""订阅数据模型与 JSON 持久化。
+
+写入策略：内存里的改动只标脏，由调用方在合适边界调用 :meth:`flush`（投递结束、
+命令处理结束）批量落盘，一次投递只产生一次磁盘写。读写都放进线程，事件循环不被
+阻塞。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Literal
+from typing import Any
 
 from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_dir
 
-from .platforms import Cursor
+from .platforms import Cursor, Platform
 
-Platform = Literal["douyin", "bilibili"]
-STORAGE_VERSION = 2
-SUPPORTED_VERSIONS = (1, STORAGE_VERSION)
-"""可读入的历史版本；读入后统一按 ``STORAGE_VERSION`` 写回。"""
+STORAGE_VERSION = 3
 
 _TARGET_KEY_FIELDS = (
     "id",
@@ -44,9 +48,11 @@ def make_target_key(target: dict[str, Any]) -> str:
     """根据目标身份字段生成稳定键。"""
 
     identity = {
-        key: target.get(key, _TARGET_KEY_DEFAULTS[key])
-        if target.get(key) is not None
-        else _TARGET_KEY_DEFAULTS[key]
+        key: (
+            target.get(key, _TARGET_KEY_DEFAULTS[key])
+            if target.get(key) is not None
+            else _TARGET_KEY_DEFAULTS[key]
+        )
         for key in _TARGET_KEY_FIELDS
     }
     return json.dumps(identity, ensure_ascii=False, sort_keys=True)
@@ -55,17 +61,15 @@ def make_target_key(target: dict[str, Any]) -> str:
 def _compact_target(target: dict[str, Any]) -> dict[str, Any]:
     """删除目标序列化中的默认字段。"""
 
-    compact = {"id": target["id"]}
+    compact: dict[str, Any] = {"id": target["id"]}
     for key in ("parent_id", "scope", "adapter"):
-        value = target.get(key)
-        if value:
+        if value := target.get(key):
             compact[key] = value
     for key in ("channel", "private"):
         if target.get(key):
             compact[key] = True
     for key in ("self_id", "platforms", "extra"):
-        value = target.get(key)
-        if value:
+        if value := target.get(key):
             compact[key] = value
     return compact
 
@@ -77,37 +81,6 @@ class TargetSubscription:
     target: dict[str, Any]
     cursors: dict[str, Cursor] = field(default_factory=dict)
     subscriber_ids: list[str] = field(default_factory=list)
-
-
-def _load_cursor(value: Any) -> Cursor | None:
-    """读取一个 feed 的游标，兼容 v1 的纯字符串格式。
-
-    Args:
-        value: v2 的 ``{"id": ..., "time": ...}``，或 v1 的作品标识字符串。
-
-    Returns:
-        解析后的游标，内容为空时返回 ``None``。
-
-    Raises:
-        TypeError: 游标结构无法识别。
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return Cursor(value, 0) if value else None
-    if isinstance(value, dict):
-        work_id = str(value.get("id") or "")
-        if not work_id:
-            return None
-        return Cursor(work_id, int(value.get("time") or 0))
-    raise TypeError("订阅游标格式无效")
-
-
-def _dump_cursor(cursor: Cursor) -> dict[str, Any]:
-    """把游标序列化成 v2 结构。"""
-
-    return {"id": cursor.work_id, "time": cursor.time}
 
 
 @dataclass
@@ -136,33 +109,43 @@ class SubscriptionStore:
         self._lock = asyncio.Lock()
         self._authors: dict[str, AuthorSubscription] = {}
         self._loaded = False
-        self._last_saved: str | None = None
+        self._dirty = False
 
     async def load(self) -> None:
-        """加载订阅数据。"""
+        """加载订阅数据；结构不认识时回退为空订阅。"""
 
         async with self._lock:
-            self._load_unlocked()
+            await self._ensure_loaded()
 
-    def _load_unlocked(self) -> None:
+    async def _ensure_loaded(self) -> None:
+        """在已持有锁的前提下按需加载，避免重入死锁。"""
+
         if self._loaded:
             return
         self._loaded = True
         path = self._get_path()
-        if not path.exists():
+        try:
+            text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(f"爱播订阅数据读取失败，将使用空订阅：{exc}")
             return
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                not isinstance(raw, dict)
-                or raw.get("version") not in SUPPORTED_VERSIONS
-                or not isinstance(raw.get("subscriptions"), list)
-            ):
-                raise ValueError("不支持的爱播订阅数据结构")
-            for item in raw["subscriptions"]:
-                self._load_author(item)
-        except (OSError, TypeError, ValueError, KeyError) as exc:
-            logger.warning(f"爱播订阅数据读取失败，将使用空订阅: {exc}")
+            self._load_json(text)
+        except (TypeError, ValueError, KeyError) as exc:
+            self._authors.clear()
+            logger.warning(f"爱播订阅数据结构无效，将使用空订阅：{exc}")
+
+    def _load_json(self, text: str) -> None:
+        raw = json.loads(text)
+        if not isinstance(raw, dict) or raw.get("version") != STORAGE_VERSION:
+            raise ValueError(f"不支持的爱播订阅数据版本：{raw.get('version')!r}")
+        subscriptions = raw.get("subscriptions")
+        if not isinstance(subscriptions, list):
+            raise TypeError("订阅列表必须是数组")
+        for item in subscriptions:
+            self._load_author(item)
 
     def _load_author(self, item: Any) -> None:
         if not isinstance(item, dict):
@@ -188,9 +171,8 @@ class SubscriptionStore:
             targets[target_key] = TargetSubscription(
                 target=target,
                 cursors={
-                    str(feed): loaded
+                    str(feed): Cursor(str(value["id"]), int(value.get("time") or 0))
                     for feed, value in cursors.items()
-                    if (loaded := _load_cursor(value)) is not None
                 },
                 subscriber_ids=[str(value) for value in subscribers],
             )
@@ -208,7 +190,7 @@ class SubscriptionStore:
         """返回订阅数据的深拷贝快照。"""
 
         async with self._lock:
-            self._load_unlocked()
+            await self._ensure_loaded()
             return {
                 key: AuthorSubscription(
                     platform=value.platform,
@@ -228,31 +210,6 @@ class SubscriptionStore:
                 for key, value in self._authors.items()
             }
 
-    async def upsert_target(
-        self,
-        platform: Platform,
-        author_id: str,
-        author_name: str,
-        target_key: str,
-        target: dict[str, Any],
-        cursors: dict[str, Cursor],
-        author_handle: str = "",
-        last_update_time: int = 0,
-    ) -> None:
-        """写入一个目标订阅，主要用于测试和恢复状态。"""
-
-        async with self._lock:
-            self._load_unlocked()
-            author = self._authors.setdefault(
-                f"{platform}:{author_id}",
-                AuthorSubscription(platform, author_id, author_name),
-            )
-            author.author_name = author_name or author.author_name
-            author.author_handle = author_handle or author.author_handle
-            author.last_update_time = max(author.last_update_time, last_update_time)
-            author.targets[target_key] = TargetSubscription(target, dict(cursors))
-            await self._save_unlocked()
-
     async def add_target(
         self,
         platform: Platform,
@@ -265,16 +222,15 @@ class SubscriptionStore:
         author_handle: str = "",
         last_update_time: int = 0,
     ) -> bool:
-        """新增订阅目标；目标已存在时不覆盖并返回 False。"""
+        """新增订阅目标；目标已存在时返回 ``False``。"""
 
         async with self._lock:
-            self._load_unlocked()
-            author_key = f"{platform}:{author_id}"
-            author = self._authors.get(author_key)
+            await self._ensure_loaded()
+            author = self._authors.get(f"{platform}:{author_id}")
             if author and target_key in author.targets:
                 return False
             author = self._authors.setdefault(
-                author_key,
+                f"{platform}:{author_id}",
                 AuthorSubscription(platform, author_id, author_name),
             )
             author.author_name = author_name or author.author_name
@@ -285,8 +241,68 @@ class SubscriptionStore:
                 dict(cursors),
                 [subscriber_id] if subscriber_id else [],
             )
-            await self._save_unlocked()
+            self._dirty = True
             return True
+
+    async def add_subscriber(
+        self, platform: Platform, author_id: str, target_key: str, subscriber_id: str
+    ) -> bool:
+        """为已有订阅新增订阅人。"""
+
+        if not subscriber_id:
+            return False
+        async with self._lock:
+            await self._ensure_loaded()
+            author = self._authors.get(f"{platform}:{author_id}")
+            target = author.targets.get(target_key) if author else None
+            if target is None or subscriber_id in target.subscriber_ids:
+                return False
+            target.subscriber_ids.append(subscriber_id)
+            self._dirty = True
+            return True
+
+    async def remove_subscriber(
+        self, platform: Platform, author_id: str, target_key: str, subscriber_id: str
+    ) -> tuple[bool, bool]:
+        """移除订阅人，返回（是否移除、是否删除整个目标）。"""
+
+        async with self._lock:
+            await self._ensure_loaded()
+            author = self._authors.get(f"{platform}:{author_id}")
+            if author is None:
+                return False, False
+            target = author.targets.get(target_key)
+            if target is None:
+                return False, False
+            if target.subscriber_ids and subscriber_id not in target.subscriber_ids:
+                return False, False
+            if subscriber_id in target.subscriber_ids:
+                target.subscriber_ids.remove(subscriber_id)
+            removed_target = not target.subscriber_ids
+            if removed_target:
+                del author.targets[target_key]
+                if not author.targets:
+                    del self._authors[author.key]
+            self._dirty = True
+            return True, removed_target
+
+    async def update_cursor(
+        self,
+        platform: Platform,
+        author_id: str,
+        target_key: str,
+        feed: str,
+        cursor: Cursor,
+    ) -> None:
+        """更新目标指定 feed 的游标；只标脏，由 :meth:`flush` 落盘。"""
+
+        async with self._lock:
+            await self._ensure_loaded()
+            author = self._authors.get(f"{platform}:{author_id}")
+            target = author.targets.get(target_key) if author else None
+            if target is not None and target.cursors.get(feed) != cursor:
+                target.cursors[feed] = cursor
+                self._dirty = True
 
     async def update_author_metadata(
         self,
@@ -296,10 +312,10 @@ class SubscriptionStore:
         author_handle: str,
         last_update_time: int,
     ) -> None:
-        """更新作者缓存信息；内容未变化时不写盘。"""
+        """更新作者缓存信息；内容未变化时不标脏。"""
 
         async with self._lock:
-            self._load_unlocked()
+            await self._ensure_loaded()
             author = self._authors.get(f"{platform}:{author_id}")
             if author is None:
                 return
@@ -315,102 +331,26 @@ class SubscriptionStore:
             author.author_name = name
             author.author_handle = handle
             author.last_update_time = updated_at
-            await self._save_unlocked()
+            self._dirty = True
 
-    async def add_subscriber(
-        self, platform: Platform, author_id: str, target_key: str, subscriber_id: str
-    ) -> bool:
-        """为已有订阅新增订阅人。"""
-
-        if not subscriber_id:
-            return False
-        async with self._lock:
-            self._load_unlocked()
-            author = self._authors.get(f"{platform}:{author_id}")
-            target = author.targets.get(target_key) if author else None
-            if target is None or subscriber_id in target.subscriber_ids:
-                return False
-            target.subscriber_ids.append(subscriber_id)
-            await self._save_unlocked()
-            return True
-
-    async def remove_subscriber(
-        self,
-        platform: Platform,
-        author_id: str,
-        target_key: str,
-        subscriber_id: str,
-    ) -> tuple[bool, bool]:
-        """移除一个订阅人，返回（是否移除、是否删除整个目标）。"""
+    async def flush(self) -> None:
+        """把内存里的改动一次写入磁盘。"""
 
         async with self._lock:
-            self._load_unlocked()
-            author = self._authors.get(f"{platform}:{author_id}")
-            if author is None:
-                return False, False
-            target = author.targets.get(target_key)
-            if target is None:
-                return False, False
-            if not target.subscriber_ids:
-                del author.targets[target_key]
-                if not author.targets:
-                    del self._authors[author.key]
-                await self._save_unlocked()
-                return True, True
-            if subscriber_id not in target.subscriber_ids:
-                return False, False
-            target.subscriber_ids.remove(subscriber_id)
-            if target.subscriber_ids:
-                await self._save_unlocked()
-                return True, False
-            del author.targets[target_key]
-            if not author.targets:
-                del self._authors[author.key]
-            await self._save_unlocked()
-            return True, True
+            if not self._dirty:
+                return
+            text = self._serialize()
+            await asyncio.to_thread(self._write, text)
+            self._dirty = False
 
-    async def remove_target(
-        self, platform: Platform, author_id: str, target_key: str
-    ) -> bool:
-        """删除一个目标订阅。"""
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[SubscriptionStore]:
+        """在边界处批量落盘；异常时也会把已生效的改动写回。"""
 
-        async with self._lock:
-            self._load_unlocked()
-            author = self._authors.get(f"{platform}:{author_id}")
-            if not author or target_key not in author.targets:
-                return False
-            del author.targets[target_key]
-            if not author.targets:
-                del self._authors[author.key]
-            await self._save_unlocked()
-            return True
-
-    async def update_cursor(
-        self,
-        platform: Platform,
-        author_id: str,
-        target_key: str,
-        feed: str,
-        cursor: Cursor,
-    ) -> None:
-        """更新目标指定 feed 的游标。"""
-
-        async with self._lock:
-            self._load_unlocked()
-            author = self._authors.get(f"{platform}:{author_id}")
-            target = author.targets.get(target_key) if author else None
-            if target is not None and target.cursors.get(feed) != cursor:
-                target.cursors[feed] = cursor
-                await self._save_unlocked()
-
-    async def _save_unlocked(self) -> None:
-        """内容有变化时才落盘，写入放到线程里避免阻塞事件循环。"""
-
-        text = self._serialize()
-        if text == self._last_saved:
-            return
-        await asyncio.to_thread(self._write, text)
-        self._last_saved = text
+        try:
+            yield self
+        finally:
+            await self.flush()
 
     def _serialize(self) -> str:
         payload = {
@@ -449,7 +389,7 @@ class SubscriptionStore:
             target_item: dict[str, Any] = {"target": _compact_target(target.target)}
             if target.cursors:
                 target_item["cursors"] = {
-                    feed: _dump_cursor(cursor)
+                    feed: {"id": cursor.work_id, "time": cursor.time}
                     for feed, cursor in target.cursors.items()
                 }
             if target.subscriber_ids:

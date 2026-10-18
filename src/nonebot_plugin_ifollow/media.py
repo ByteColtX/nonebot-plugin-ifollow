@@ -31,6 +31,8 @@ import httpx
 from nonebot import logger
 from nonebot_plugin_alconna import UniMessage
 
+from .settings import Settings
+
 IMAGE_BATCH_SIZE = 9
 """单条消息最多拼接的图片数量，超出拆成多条发送。"""
 
@@ -51,6 +53,25 @@ SEPARATOR = "─" * 12
 
 _hub: Any | None = None
 _hub_lock = asyncio.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class MediaPolicy:
+    """一条作品的媒体处理策略，由配置换算一次后传下去。"""
+
+    max_bytes: int
+    max_count: int = MAX_MEDIA_COUNT
+    image_batch: int = IMAGE_BATCH_SIZE
+    base64_media: bool = False
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> MediaPolicy:
+        """从运行期配置构造策略。"""
+
+        return cls(
+            max_bytes=settings.media_max_bytes,
+            base64_media=settings.use_base64,
+        )
 
 
 @dataclass(frozen=True)
@@ -304,7 +325,7 @@ async def _keep_by_size(
     return True
 
 
-async def _drop_oversized_media(result: Any, max_bytes: int, label: str) -> None:
+async def _drop_oversized_media(result: Any, policy: MediaPolicy, label: str) -> None:
     """下载前剔除超限的视频类媒体，避免白下载。
 
     只探测视频、动图与实况照片；探测失败或拿不到长度时保留该媒体，由下载后的体积
@@ -312,7 +333,7 @@ async def _drop_oversized_media(result: Any, max_bytes: int, label: str) -> None
 
     Args:
         result: parsehub 的解析结果，会就地修改它的 ``media``。
-        max_bytes: 单个媒体的体积上限。
+        policy: 媒体处理策略。
         label: 日志里使用的平台名。
     """
 
@@ -326,7 +347,7 @@ async def _drop_oversized_media(result: Any, max_bytes: int, label: str) -> None
         return
     async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
         keep = await asyncio.gather(
-            *(_keep_by_size(client, ref, max_bytes, label) for ref in targets)
+            *(_keep_by_size(client, ref, policy.max_bytes, label) for ref in targets)
         )
     dropped = {id(ref) for ref, kept in zip(targets, keep) if not kept}
     if not dropped:
@@ -487,11 +508,10 @@ async def media_messages_for(
     meta: WorkMeta,
     url: str,
     *,
+    policy: MediaPolicy,
     cookie: str | None,
     label: str,
     temp_prefix: str,
-    max_bytes: int,
-    base64_media: bool = False,
 ) -> AsyncIterator[list[UniMessage]]:
     """解析并下载一个作品，产出待发送的消息列表。
 
@@ -500,11 +520,10 @@ async def media_messages_for(
     Args:
         meta: 作者与发布时间。
         url: 作品链接。
+        policy: 媒体处理策略。
         cookie: 对应平台的 Cookie。
         label: 日志里使用的平台名。
         temp_prefix: 临时目录前缀。
-        max_bytes: 单个媒体的体积上限，``0`` 表示不限制。
-        base64_media: 是否把媒体编码成 base64 发送。
 
     Yields:
         消息列表，第一条是文案，其后是媒体。
@@ -513,16 +532,16 @@ async def media_messages_for(
     workdir = Path(tempfile.mkdtemp(prefix=temp_prefix))
     try:
         result = await parse_work(url, cookie)
-        if max_bytes:
-            await _drop_oversized_media(result, max_bytes, label)
+        if policy.max_bytes:
+            await _drop_oversized_media(result, policy, label)
         download = await result.download(workdir)
         yield await build_messages(
             result,
             download,
             meta,
             label=label,
-            max_bytes=max_bytes,
-            base64_media=base64_media,
+            max_bytes=policy.max_bytes,
+            base64_media=policy.base64_media,
         )
     finally:
         await asyncio.to_thread(shutil.rmtree, workdir, ignore_errors=True)
