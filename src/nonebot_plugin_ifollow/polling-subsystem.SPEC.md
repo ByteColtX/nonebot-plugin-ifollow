@@ -1,14 +1,15 @@
 ---
-id: polling
+id: polling-subsystem
 type: module-design
 status: draft
-title: 轮询调度与投递契约
+title: 轮询子系统契约
 depends-on: [models, media, douyin-fetch, bilibili-fetch]
 ---
 
 ## Responsibility
 
-轮询子系统由四个模块组成，共同负责「发现到期作者 → 抓取 → 投递 → 记状态」：
+轮询子系统由四个模块组成，共同负责「发现到期作者 → 抓取 → 投递 → 记状态」。
+本文件是这一个边界的唯一 spec；四个文件是实现分解，不各自建 spec。
 
 | 模块 | 职责 |
 | :--- | :--- |

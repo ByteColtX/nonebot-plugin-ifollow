@@ -15,7 +15,8 @@ depends-on: [media]
 
 - 输入：`Settings`、作者主页链接、BV/AV 视频链接、b23.tv 短链，或轮询时的 `mid`。
 - 输出：`ResolvedAuthor`（作者 + 首页各 feed）或 `list[PlatformWork]`（从新到旧）。
-- 错误：只抛 `errors.TransientError` / `PermanentError`。
+- 错误：网络与平台错误只抛 `errors.TransientError` / `PermanentError`；输入无法识别时抛
+  `ValueError`，不进入重试。
 - 不负责下载与发送；发送见 `bilibili-send.SPEC.md`。
 
 ## 接口契约
