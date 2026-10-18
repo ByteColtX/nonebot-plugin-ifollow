@@ -242,9 +242,7 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
             and (not platform_label or platform_name(author.platform) == platform_label)
         ]
         if len(matched) != 1:
-            await UniMessage(
-                f"引用的通知里没找到「{name}」的订阅，请直接发 爱播取消订阅 <序号>。"
-            ).finish()
+            await UniMessage(f"「{name}」当前没有订阅，可能已经取消过了。").finish()
         platform, author_id, author_name = (
             matched[0].platform,
             matched[0].author_id,

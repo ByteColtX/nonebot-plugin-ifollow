@@ -464,7 +464,7 @@ async def test_unsubscribe_from_quoted_notice_unknown_author(env: Any) -> None:
             event, FakeBot("抖音 · 别人 发布了新作品\n────"), args("")
         )
 
-    assert "没找到「别人」的订阅" in FakeUniMessage.sent[0]
+    assert "「别人」当前没有订阅" in FakeUniMessage.sent[0]
     assert len(await store.snapshot()) == 1
 
 
