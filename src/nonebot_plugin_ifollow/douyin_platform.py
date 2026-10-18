@@ -87,7 +87,6 @@ async def resolve_sec_user_id(value: str) -> str:
         headers=_headers(),
         follow_redirects=True,
         timeout=20,
-        verify=False,
     ) as client:
         response = await client.get(
             matched.group(0), cookies=_parse_cookie(config.ifollow_douyin_cookie)
@@ -165,7 +164,6 @@ async def fetch_latest_works(
         headers=_headers(),
         follow_redirects=True,
         timeout=30,
-        verify=False,
     ) as client:
         while True:
             data = await _fetch_post_page(client, sec_user_id, max_cursor)
@@ -271,7 +269,6 @@ async def fetch_author_profile(sec_user_id: str) -> tuple[str, str]:
         headers=_headers(),
         follow_redirects=True,
         timeout=20,
-        verify=False,
     ) as client:
         data = await _request_json(
             client,
@@ -388,7 +385,6 @@ async def _ensure_ttwid() -> str:
             headers=_headers(),
             follow_redirects=True,
             timeout=20,
-            verify=False,
         ) as client:
             response = await client.post(
                 TTWID_REGISTER_URL,

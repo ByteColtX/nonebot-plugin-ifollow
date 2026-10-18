@@ -573,3 +573,32 @@ async def test_app_video_works_omits_ps_and_stops_at_limit(
     assert len(works) == 5
     assert len(FakeAppClient.requests) == 1
     assert "ps" not in FakeAppClient.requests[0]["params"]
+
+
+@pytest.mark.asyncio
+async def test_web_fallback_ignores_non_dict_last_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """网页兜底遇到非对象条目时按「没有翻页游标」处理，不抛 AttributeError。"""
+
+    use_app_responses(monkeypatch, {"code": -400, "message": "请求错误"})
+    FakeUser.pages = [
+        {
+            "media_list": [
+                {
+                    "id": 100,
+                    "bv_id": "BV1AbcdefG12",
+                    "title": "标题",
+                    "pubtime": 200,
+                    "upper": {"mid": 123, "name": "作者"},
+                },
+                "broken",
+            ],
+            "has_more": True,
+        }
+    ]
+    monkeypatch.setattr(bili, "User", FakeUser)
+
+    works = await bili.fetch_video_works("123")
+
+    assert [work.work_id for work in works] == ["BV1AbcdefG12"]

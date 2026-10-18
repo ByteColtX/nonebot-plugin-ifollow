@@ -217,7 +217,6 @@ async def _resolve_short_link(value: str) -> str:
             headers=BILIBILI_BROWSER_HEADERS,
             follow_redirects=True,
             timeout=20,
-            verify=False,
         ) as client:
             response = await client.get(short_url)
             response.raise_for_status()
@@ -386,7 +385,8 @@ async def _fetch_video_works_web(
             break
         if page_reaches_cursor(page, cursor):
             break
-        last_aid = items[-1].get("id")
+        last_item = items[-1] if isinstance(items[-1], dict) else {}
+        last_aid = last_item.get("id")
         if not last_aid:
             break
         oid = int(last_aid)
