@@ -54,10 +54,23 @@ poll_lock = asyncio.Lock()
 author_poll_states: dict[str, AuthorPollState] = {}
 send_retry_attempts: dict[tuple[str, str, str, str, str], int] = {}
 send_retry_until: dict[tuple[str, str, str, str, str], float] = {}
+permanent_target_warned: set[str] = set()
+"""已警告过不可用的目标，避免每个作者每轮都刷一条 warning。"""
 POLL_BACKOFF_BASE_SECONDS = 30.0
 POLL_BACKOFF_MAX_SECONDS = 300.0
 SEND_BACKOFF_BASE_SECONDS = 30.0
 SEND_BACKOFF_MAX_SECONDS = 300.0
+PERMANENT_TARGET_KEYWORDS = (
+    "被移出该群",
+    "重新加群",
+    "群不存在",
+    "不在该群",
+    "不在群里",
+    "群号不存在",
+    "not in group",
+    "group not found",
+)
+"""发送失败信息里表示目标群已不可用的关键字。"""
 HELP_MESSAGE = (
     "爱播帮助：\n"
     "爱播订阅 <抖音或 B 站作者主页/作品链接>\n"
@@ -395,7 +408,19 @@ async def _deliver_new_works(
             continue
         try:
             await _send_work(work, target, target_state.subscriber_ids)
-        except Exception:
+        except Exception as exc:
+            if _is_permanent_target_error(exc):
+                send_retry_attempts.pop(retry_key, None)
+                send_retry_until.pop(retry_key, None)
+                if target.id in permanent_target_warned:
+                    logger.debug(f"目标 {target.id} 仍不可用，跳过")
+                else:
+                    permanent_target_warned.add(target.id)
+                    logger.warning(
+                        f"目标 {target.id} 已不可用（{exc}），本轮跳过该目标且不重试；"
+                        "如果确实不在该群了，可以取消对应订阅"
+                    )
+                return
             attempt = send_retry_attempts.get(retry_key, 0) + 1
             send_retry_attempts[retry_key] = attempt
             delay = _exponential_backoff_seconds(
@@ -411,6 +436,7 @@ async def _deliver_new_works(
             return
         send_retry_attempts.pop(retry_key, None)
         send_retry_until.pop(retry_key, None)
+        permanent_target_warned.discard(target.id)
         if work.bvid:
             sent_bvids.add(work.bvid)
         await store.update_cursor(
@@ -511,6 +537,25 @@ async def _send_work(
             messages[0] += footer
         for message in messages:
             await message.send(target=target)
+
+
+def _is_permanent_target_error(exc: BaseException) -> bool:
+    """判断发送失败是否因为目标群已不可用（机器人被踢、群解散）。
+
+    Args:
+        exc: 发送时抛出的异常。
+
+    Returns:
+        目标群已不可用时返回 True，此时重试没有意义。
+    """
+
+    info = getattr(exc, "info", None)
+    if isinstance(info, dict):
+        text = " ".join(str(info.get(key) or "") for key in ("message", "wording"))
+    else:
+        text = str(exc)
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in PERMANENT_TARGET_KEYWORDS)
 
 
 def _record_author_failure(
