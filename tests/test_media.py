@@ -167,8 +167,8 @@ async def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
     assert [segment.type for segment in messages[1]] == ["image"]
 
 
-async def test_media_segments_are_sent_as_raw_bytes(tmp_path: Path) -> None:
-    """协议端在另一台机器，媒体必须以 base64 发送而不是 file:// 路径。"""
+async def test_media_segments_use_local_path_by_default(tmp_path: Path) -> None:
+    """默认把本地路径交给协议端，不读字节也不编码。"""
 
     video = write(tmp_path / "work", suffix=".mp4")
     image = write(tmp_path / "img")
@@ -177,5 +177,22 @@ async def test_media_segments_are_sent_as_raw_bytes(tmp_path: Path) -> None:
 
     segments = [segment for message in bundle.messages for segment in message]
     assert segments
-    assert all(segment.raw for segment in segments)
-    assert all(segment.path is None for segment in segments)
+    assert all(segment.path for segment in segments)
+    assert all(segment.raw is None for segment in segments)
+    assert all(segment.url is None for segment in segments)
+
+
+async def test_media_segments_switch_to_base64_when_enabled(tmp_path: Path) -> None:
+    """跨主机部署时改用 base64 消息段。"""
+
+    video = write(tmp_path / "work", suffix=".mp4")
+
+    bundle = await media.media_messages(
+        [make_file(video)], 0, "抖音", base64_media=True
+    )
+
+    (segment,) = list(bundle.messages[0])
+    assert segment.path is None
+    assert segment.raw is None
+    assert segment.url is not None
+    assert segment.url.startswith("base64://")

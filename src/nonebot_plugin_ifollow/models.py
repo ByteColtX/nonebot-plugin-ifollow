@@ -13,8 +13,12 @@ from typing import Any, Literal
 from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_dir
 
+from .platforms import Cursor
+
 Platform = Literal["douyin", "bilibili"]
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
+SUPPORTED_VERSIONS = (1, STORAGE_VERSION)
+"""可读入的历史版本；读入后统一按 ``STORAGE_VERSION`` 写回。"""
 
 _TARGET_KEY_FIELDS = (
     "id",
@@ -71,8 +75,39 @@ class TargetSubscription:
     """一个目标会话的订阅状态。"""
 
     target: dict[str, Any]
-    cursors: dict[str, str | None] = field(default_factory=dict)
+    cursors: dict[str, Cursor] = field(default_factory=dict)
     subscriber_ids: list[str] = field(default_factory=list)
+
+
+def _load_cursor(value: Any) -> Cursor | None:
+    """读取一个 feed 的游标，兼容 v1 的纯字符串格式。
+
+    Args:
+        value: v2 的 ``{"id": ..., "time": ...}``，或 v1 的作品标识字符串。
+
+    Returns:
+        解析后的游标，内容为空时返回 ``None``。
+
+    Raises:
+        TypeError: 游标结构无法识别。
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return Cursor(value, 0) if value else None
+    if isinstance(value, dict):
+        work_id = str(value.get("id") or "")
+        if not work_id:
+            return None
+        return Cursor(work_id, int(value.get("time") or 0))
+    raise TypeError("订阅游标格式无效")
+
+
+def _dump_cursor(cursor: Cursor) -> dict[str, Any]:
+    """把游标序列化成 v2 结构。"""
+
+    return {"id": cursor.work_id, "time": cursor.time}
 
 
 @dataclass
@@ -101,6 +136,7 @@ class SubscriptionStore:
         self._lock = asyncio.Lock()
         self._authors: dict[str, AuthorSubscription] = {}
         self._loaded = False
+        self._last_saved: str | None = None
 
     async def load(self) -> None:
         """加载订阅数据。"""
@@ -119,7 +155,7 @@ class SubscriptionStore:
             raw = json.loads(path.read_text(encoding="utf-8"))
             if (
                 not isinstance(raw, dict)
-                or raw.get("version") != STORAGE_VERSION
+                or raw.get("version") not in SUPPORTED_VERSIONS
                 or not isinstance(raw.get("subscriptions"), list)
             ):
                 raise ValueError("不支持的爱播订阅数据结构")
@@ -152,8 +188,9 @@ class SubscriptionStore:
             targets[target_key] = TargetSubscription(
                 target=target,
                 cursors={
-                    str(feed): str(cursor) if cursor is not None else None
-                    for feed, cursor in cursors.items()
+                    str(feed): loaded
+                    for feed, value in cursors.items()
+                    if (loaded := _load_cursor(value)) is not None
                 },
                 subscriber_ids=[str(value) for value in subscribers],
             )
@@ -198,7 +235,7 @@ class SubscriptionStore:
         author_name: str,
         target_key: str,
         target: dict[str, Any],
-        cursors: dict[str, str | None],
+        cursors: dict[str, Cursor],
         author_handle: str = "",
         last_update_time: int = 0,
     ) -> None:
@@ -214,7 +251,7 @@ class SubscriptionStore:
             author.author_handle = author_handle or author.author_handle
             author.last_update_time = max(author.last_update_time, last_update_time)
             author.targets[target_key] = TargetSubscription(target, dict(cursors))
-            self._save_unlocked()
+            await self._save_unlocked()
 
     async def add_target(
         self,
@@ -223,7 +260,7 @@ class SubscriptionStore:
         author_name: str,
         target_key: str,
         target: dict[str, Any],
-        cursors: dict[str, str | None],
+        cursors: dict[str, Cursor],
         subscriber_id: str | None = None,
         author_handle: str = "",
         last_update_time: int = 0,
@@ -248,7 +285,7 @@ class SubscriptionStore:
                 dict(cursors),
                 [subscriber_id] if subscriber_id else [],
             )
-            self._save_unlocked()
+            await self._save_unlocked()
             return True
 
     async def update_author_metadata(
@@ -259,17 +296,26 @@ class SubscriptionStore:
         author_handle: str,
         last_update_time: int,
     ) -> None:
-        """更新作者缓存信息。"""
+        """更新作者缓存信息；内容未变化时不写盘。"""
 
         async with self._lock:
             self._load_unlocked()
             author = self._authors.get(f"{platform}:{author_id}")
             if author is None:
                 return
-            author.author_name = author_name or author.author_name
-            author.author_handle = author_handle or author.author_handle
-            author.last_update_time = max(author.last_update_time, last_update_time)
-            self._save_unlocked()
+            name = author_name or author.author_name
+            handle = author_handle or author.author_handle
+            updated_at = max(author.last_update_time, last_update_time)
+            if (name, handle, updated_at) == (
+                author.author_name,
+                author.author_handle,
+                author.last_update_time,
+            ):
+                return
+            author.author_name = name
+            author.author_handle = handle
+            author.last_update_time = updated_at
+            await self._save_unlocked()
 
     async def add_subscriber(
         self, platform: Platform, author_id: str, target_key: str, subscriber_id: str
@@ -285,7 +331,7 @@ class SubscriptionStore:
             if target is None or subscriber_id in target.subscriber_ids:
                 return False
             target.subscriber_ids.append(subscriber_id)
-            self._save_unlocked()
+            await self._save_unlocked()
             return True
 
     async def remove_subscriber(
@@ -309,18 +355,18 @@ class SubscriptionStore:
                 del author.targets[target_key]
                 if not author.targets:
                     del self._authors[author.key]
-                self._save_unlocked()
+                await self._save_unlocked()
                 return True, True
             if subscriber_id not in target.subscriber_ids:
                 return False, False
             target.subscriber_ids.remove(subscriber_id)
             if target.subscriber_ids:
-                self._save_unlocked()
+                await self._save_unlocked()
                 return True, False
             del author.targets[target_key]
             if not author.targets:
                 del self._authors[author.key]
-            self._save_unlocked()
+            await self._save_unlocked()
             return True, True
 
     async def remove_target(
@@ -336,7 +382,7 @@ class SubscriptionStore:
             del author.targets[target_key]
             if not author.targets:
                 del self._authors[author.key]
-            self._save_unlocked()
+            await self._save_unlocked()
             return True
 
     async def update_cursor(
@@ -345,7 +391,7 @@ class SubscriptionStore:
         author_id: str,
         target_key: str,
         feed: str,
-        cursor: str,
+        cursor: Cursor,
     ) -> None:
         """更新目标指定 feed 的游标。"""
 
@@ -353,24 +399,35 @@ class SubscriptionStore:
             self._load_unlocked()
             author = self._authors.get(f"{platform}:{author_id}")
             target = author.targets.get(target_key) if author else None
-            if target is not None:
+            if target is not None and target.cursors.get(feed) != cursor:
                 target.cursors[feed] = cursor
-                self._save_unlocked()
+                await self._save_unlocked()
 
-    def _save_unlocked(self) -> None:
-        path = self._get_path()
+    async def _save_unlocked(self) -> None:
+        """内容有变化时才落盘，写入放到线程里避免阻塞事件循环。"""
+
+        text = self._serialize()
+        if text == self._last_saved:
+            return
+        await asyncio.to_thread(self._write, text)
+        self._last_saved = text
+
+    def _serialize(self) -> str:
         payload = {
             "version": STORAGE_VERSION,
             "subscriptions": [
                 self._serialize_author(author) for author in self._authors.values()
             ],
         }
+        return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+    def _write(self, text: str) -> None:
+        path = self._get_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile(
             "w", encoding="utf-8", dir=path.parent, delete=False
         ) as temp:
-            json.dump(payload, temp, ensure_ascii=False, indent=2)
-            temp.write("\n")
+            temp.write(text)
             temp_path = Path(temp.name)
         os.replace(temp_path, path)
 
@@ -391,7 +448,10 @@ class SubscriptionStore:
         for target in author.targets.values():
             target_item: dict[str, Any] = {"target": _compact_target(target.target)}
             if target.cursors:
-                target_item["cursors"] = target.cursors
+                target_item["cursors"] = {
+                    feed: _dump_cursor(cursor)
+                    for feed, cursor in target.cursors.items()
+                }
             if target.subscriber_ids:
                 target_item["subscribers"] = target.subscriber_ids
             item["targets"].append(target_item)

@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from nonebot_plugin_ifollow import bilibili_platform as bili
+from nonebot_plugin_ifollow.platforms import Cursor
 
 
 def test_extract_bilibili_links() -> None:
@@ -324,7 +325,7 @@ async def test_app_video_pagination_uses_last_aid(
         },
     )
 
-    works = await bili.fetch_video_works("123", cursor="BV1")
+    works = await bili.fetch_video_works("123", cursor=Cursor("BV1"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
     assert FakeAppClient.requests[1]["params"]["aid"] == "100"
@@ -348,7 +349,7 @@ async def test_app_video_pagination_stops_at_cursor(
         },
     )
 
-    works = await bili.fetch_video_works("123", cursor="BV99")
+    works = await bili.fetch_video_works("123", cursor=Cursor("BV99"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
     assert len(FakeAppClient.requests) == 1
@@ -444,7 +445,7 @@ async def test_video_pagination_uses_last_aid_on_web_fallback(
 
     monkeypatch.setattr(bili, "User", make_user)
 
-    works = await bili.fetch_video_works("123", cursor="BV99")
+    works = await bili.fetch_video_works("123", cursor=Cursor("BV99"))
 
     assert [work.work_id for work in works] == ["BV100", "BV99"]
     assert instances[0].calls[1]["oid"] == 100

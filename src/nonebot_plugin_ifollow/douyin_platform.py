@@ -12,7 +12,13 @@ from nonebot import logger
 
 from .config import config
 from .douyin_abogus import generate_abogus
-from .platforms import AuthorInfo, PlatformWork
+from .platforms import (
+    MAX_CATCHUP_PAGES,
+    AuthorInfo,
+    Cursor,
+    PlatformWork,
+    page_reaches_cursor,
+)
 
 PROFILE_RE = re.compile(
     r"(?:https?://)?(?:(?:www\.|m\.)?douyin\.com/user/"
@@ -135,15 +141,68 @@ def _extract_sec_user_id_from_page(page_text: str) -> str | None:
     return matched.group("sec_user_id") if matched else None
 
 
-async def fetch_latest_works(sec_user_id: str) -> list[PlatformWork]:
-    """读取作者最新作品，返回从新到旧的列表。"""
+async def fetch_latest_works(
+    sec_user_id: str, cursor: Cursor | None = None
+) -> list[PlatformWork]:
+    """读取作者最新作品，返回从新到旧的列表。
+
+    Args:
+        sec_user_id: 作者 sec_user_id。
+        cursor: 目标当前的游标；传入时会按页补发，直到盖到游标或达到页数上限。
+
+    Returns:
+        从新到旧排列的作品列表。
+
+    Raises:
+        DouyinRequestError: 接口被风控、返回错误码或数据格式异常。
+    """
+
+    works: list[PlatformWork] = []
+    seen: set[str] = set()
+    max_cursor = "0"
+    async with httpx.AsyncClient(
+        headers=_headers(),
+        follow_redirects=True,
+        timeout=30,
+        verify=False,
+    ) as client:
+        for _ in range(MAX_CATCHUP_PAGES if cursor else 1):
+            data = await _fetch_post_page(client, sec_user_id, max_cursor)
+            raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
+            if not isinstance(raw_works, list):
+                raise DouyinRequestError("抖音接口缺少 aweme_list")
+            page: list[PlatformWork] = []
+            for raw in raw_works:
+                work = _parse_work_item(raw, sec_user_id)
+                if work is None or work.work_id in seen:
+                    continue
+                seen.add(work.work_id)
+                page.append(work)
+            works.extend(page)
+            if not page or not data.get("has_more"):
+                break
+            if cursor and page_reaches_cursor(page, cursor):
+                break
+            next_cursor = str(data.get("max_cursor") or "")
+            if not next_cursor or next_cursor == max_cursor:
+                break
+            max_cursor = next_cursor
+    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
+    logger.debug(f"抖音作者 {sec_user_id} 拉取到 {len(works)} 个作品")
+    return works
+
+
+async def _fetch_post_page(
+    client: httpx.AsyncClient, sec_user_id: str, max_cursor: str
+) -> dict[str, Any]:
+    """请求一页作者作品，并校验返回码。"""
 
     params = {
         "device_platform": "webapp",
         "aid": "6383",
         "channel": "channel_pc_web",
         "sec_user_id": sec_user_id,
-        "max_cursor": "0",
+        "max_cursor": max_cursor,
         "locate_query": "false",
         "count": str(config.ifollow_subscribe_count),
         "publish_video_strategy_type": "2",
@@ -158,14 +217,7 @@ async def fetch_latest_works(sec_user_id: str) -> list[PlatformWork]:
         "browser_name": "Chrome",
         "browser_version": "131.0.0.0",
     }
-    async with httpx.AsyncClient(
-        headers=_headers(),
-        follow_redirects=True,
-        timeout=30,
-        verify=False,
-    ) as client:
-        data = await _request_json(client, AUTHOR_POST_URL, params)
-
+    data = await _request_json(client, AUTHOR_POST_URL, params)
     status_code = data.get("status_code", 0)
     if status_code not in (0, "0", None):
         if str(status_code) == str(INVALID_AUTHOR_STATUS):
@@ -174,41 +226,33 @@ async def fetch_latest_works(sec_user_id: str) -> list[PlatformWork]:
                 retryable=False,
             )
         raise DouyinRequestError(f"抖音接口返回错误码: {status_code}", retryable=True)
+    return data
 
-    raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
-    if not isinstance(raw_works, list):
-        raise DouyinRequestError("抖音接口缺少 aweme_list")
 
-    works: list[PlatformWork] = []
-    for raw in raw_works:
-        if not isinstance(raw, dict):
-            continue
-        aweme_id = str(raw.get("aweme_id") or "")
-        if not aweme_id:
-            continue
-        author = raw.get("author") or {}
-        if not isinstance(author, dict):
-            author = {}
-        author_name = str(author.get("nickname") or sec_user_id)
-        author_unique_id = _extract_unique_id(author)
-        works.append(
-            PlatformWork(
-                platform="douyin",
-                work_id=aweme_id,
-                url=f"https://www.douyin.com/video/{aweme_id}",
-                title=str(raw.get("desc") or ""),
-                description=str(raw.get("desc") or ""),
-                create_time=int(raw.get("create_time") or 0),
-                author=AuthorInfo(
-                    author_id=sec_user_id,
-                    name=author_name,
-                    handle=author_unique_id,
-                ),
-            )
-        )
-    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
-    logger.debug(f"抖音作者 {sec_user_id} 拉取到 {len(works)} 个作品")
-    return works
+def _parse_work_item(raw: Any, sec_user_id: str) -> PlatformWork | None:
+    """把一条作品数据转换成统一作品模型。"""
+
+    if not isinstance(raw, dict):
+        return None
+    aweme_id = str(raw.get("aweme_id") or "")
+    if not aweme_id:
+        return None
+    author = raw.get("author") or {}
+    if not isinstance(author, dict):
+        author = {}
+    return PlatformWork(
+        platform="douyin",
+        work_id=aweme_id,
+        url=f"https://www.douyin.com/video/{aweme_id}",
+        title=str(raw.get("desc") or ""),
+        description=str(raw.get("desc") or ""),
+        create_time=int(raw.get("create_time") or 0),
+        author=AuthorInfo(
+            author_id=sec_user_id,
+            name=str(author.get("nickname") or sec_user_id),
+            handle=_extract_unique_id(author),
+        ),
+    )
 
 
 def _response_excerpt(text: str, limit: int = 160) -> str:

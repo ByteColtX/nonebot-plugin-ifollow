@@ -46,5 +46,6 @@ async def bilibili_media_messages(
         label="B站",
         temp_prefix="ifollow-bilibili-",
         max_bytes=config.ifollow_media_max_mb * 1024 * 1024,
+        base64_media=config.ifollow_use_base64,
     ) as messages:
         yield messages

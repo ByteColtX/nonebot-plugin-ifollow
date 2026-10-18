@@ -15,7 +15,13 @@ from bilibili_api.video import Video
 from nonebot import logger
 
 from .config import config
-from .platforms import AuthorInfo, PlatformWork
+from .platforms import (
+    MAX_CATCHUP_PAGES,
+    AuthorInfo,
+    Cursor,
+    PlatformWork,
+    page_reaches_cursor,
+)
 
 PROFILE_RE = re.compile(
     r"(?:https?://)?(?:(?:www\.)?space\.bilibili\.com/|m\.bilibili\.com/space/)"
@@ -31,7 +37,6 @@ BILIBILI_BROWSER_HEADERS = {
     ),
     "Referer": "https://www.bilibili.com/",
 }
-MAX_CATCHUP_PAGES = 5
 BILIBILI_APP_API = "https://app.bilibili.com"
 BILIBILI_APP_CREDENTIALS = (
     ("1d8b6e7d45233436", "560c52ccd288fed045859ed18bffd973"),
@@ -268,7 +273,9 @@ async def _fetch_author_profile_web(mid: str) -> AuthorInfo:
     )
 
 
-async def fetch_video_works(mid: str, cursor: str | None = None) -> list[PlatformWork]:
+async def fetch_video_works(
+    mid: str, cursor: Cursor | None = None
+) -> list[PlatformWork]:
     """读取 B 站作者视频投稿，返回从新到旧的列表。"""
 
     try:
@@ -279,7 +286,7 @@ async def fetch_video_works(mid: str, cursor: str | None = None) -> list[Platfor
 
 
 async def _fetch_video_works_app(
-    mid: str, cursor: str | None = None
+    mid: str, cursor: Cursor | None = None
 ) -> list[PlatformWork]:
     """通过 APP 接口读取 B 站作者视频投稿。"""
 
@@ -299,15 +306,17 @@ async def _fetch_video_works_app(
             items = data.get("item") or []
             if not isinstance(items, list):
                 raise BilibiliRequestError("B 站 APP 投稿列表缺少 item")
+            page: list[PlatformWork] = []
             for item in items:
                 work = _parse_app_video_item(item, mid)
                 if work is None or work.work_id in seen:
                     continue
                 seen.add(work.work_id)
-                works.append(work)
-            if not items or not data.get("has_next"):
+                page.append(work)
+            works.extend(page)
+            if not page or not data.get("has_next"):
                 break
-            if cursor and any(str(item.get("bvid") or "") == cursor for item in items):
+            if cursor and page_reaches_cursor(page, cursor):
                 break
             last_item = items[-1] if isinstance(items[-1], dict) else {}
             last_aid = last_item.get("param")
@@ -342,7 +351,7 @@ def _parse_app_video_item(item: Any, mid: str) -> PlatformWork | None:
 
 
 async def _fetch_video_works_web(
-    mid: str, cursor: str | None = None
+    mid: str, cursor: Cursor | None = None
 ) -> list[PlatformWork]:
     """通过网页接口读取 B 站作者视频投稿。"""
 
@@ -366,15 +375,17 @@ async def _fetch_video_works_web(
         items = result.get("media_list") or []
         if not isinstance(items, list):
             raise BilibiliRequestError("B 站投稿列表缺少 media_list")
+        page: list[PlatformWork] = []
         for item in items:
             work = _parse_video_item(item, mid, author)
             if work is None:
                 continue
             author = work.author
-            works.append(work)
-        if not items or not result.get("has_more"):
+            page.append(work)
+        works.extend(page)
+        if not page or not result.get("has_more"):
             break
-        if cursor and any(str(item.get("bv_id") or "") == cursor for item in items):
+        if cursor and page_reaches_cursor(page, cursor):
             break
         last_aid = items[-1].get("id")
         if not last_aid:
@@ -415,7 +426,7 @@ def _parse_video_item(
 
 
 async def fetch_dynamic_works(
-    mid: str, cursor: str | None = None
+    mid: str, cursor: Cursor | None = None
 ) -> list[PlatformWork]:
     """读取 B 站作者动态，返回从新到旧的列表。"""
 
@@ -432,13 +443,11 @@ async def fetch_dynamic_works(
         items = result.get("items") or []
         if not isinstance(items, list):
             raise BilibiliRequestError("B 站动态列表缺少 items")
-        for item in items:
-            work = _parse_dynamic_item(item, mid)
-            if work is not None:
-                works.append(work)
-        if not items or not result.get("has_more"):
+        page = [work for item in items if (work := _parse_dynamic_item(item, mid))]
+        works.extend(page)
+        if not page or not result.get("has_more"):
             break
-        if cursor and any(str(item.get("id_str") or "") == cursor for item in items):
+        if cursor and page_reaches_cursor(page, cursor):
             break
         next_offset = str(result.get("offset") or "")
         if not next_offset or next_offset == offset:
