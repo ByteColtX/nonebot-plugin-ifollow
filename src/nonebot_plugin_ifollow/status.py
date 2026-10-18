@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .failures import WORK_RETRY_LIMIT
+from .media import SEPARATOR
 from .models import AuthorSubscription
 from .settings import Settings
 
@@ -90,27 +91,28 @@ def render(
     now = time.monotonic()
     lines = [
         "爱播状态",
-        f"调度：每 {int(tick_seconds)} 秒扫描 · "
-        f"作者周期 {settings.interval} 秒 · "
+        SEPARATOR,
+        f"· 调度：每 {int(tick_seconds)} 秒扫描，作者周期 {settings.interval} 秒，"
         f"抓取并发 {fetch_concurrency}",
     ]
     if last_round_at:
         lines.append(
-            f"上次轮询：{format_age(now - last_round_at)}"
+            f"· 上次轮询：{format_age(now - last_round_at)}"
             f"（耗时 {stats.duration:.1f} 秒，"
             f"{stats.due}/{stats.authors} 个作者到期）"
         )
     else:
-        lines.append("上次轮询：尚未运行")
+        lines.append("· 上次轮询：尚未运行")
     if in_flight:
-        lines.append(f"正在抓取：{len(in_flight)} 个作者")
+        lines.append(f"· 正在抓取：{len(in_flight)} 个作者")
     lines.append(
-        f"本轮：{stats.new_works} 个新作品 · 发送 {stats.delivered} 次 · "
+        f"· 本轮：{stats.new_works} 个新作品，发送 {stats.delivered} 次，"
         f"放弃 {stats.abandoned} 个"
     )
     if recent_abandoned:
         title, reason = recent_abandoned[-1]
-        lines.append(f"最近放弃：{title}（{reason}）")
+        lines.append(f"· 最近放弃：{title}（{reason}）")
+    lines.append(SEPARATOR)
     unhealthy = [
         (author_key, state)
         for author_key, state in states.items()
@@ -119,18 +121,17 @@ def render(
     if not unhealthy:
         lines.append("所有作者状态正常。")
         return "\n".join(lines)
-    lines.append("")
-    lines.append(f"异常作者（{len(unhealthy)} 个）：")
+    lines.append(f"异常作者（{len(unhealthy)} 个）")
     for author_key, state in sorted(unhealthy)[:10]:
         author = authors[author_key]
         if state.disabled:
             lines.append(
-                f"{platform_name(author.platform)} {author.author_name}："
+                f"· {platform_name(author.platform)} {author.author_name}："
                 f"已停用（{state.last_error}）"
             )
             continue
         lines.append(
-            f"{platform_name(author.platform)} {author.author_name}："
+            f"· {platform_name(author.platform)} {author.author_name}："
             f"连续失败 {state.failure_count} 次（{state.last_error}），"
             f"{format_wait(state.next_poll_at - now)}重试"
         )

@@ -170,7 +170,7 @@ async def test_subscribe_records_cursor_with_publish_time(
     snapshot = await store.snapshot()
     cursors = snapshot["douyin:sec"].targets[target_key()].cursors
     assert cursors["video"] == Cursor("w9", 900)
-    assert FakeUniMessage.sent[0].startswith("已订阅抖音作者 作者。")
+    assert FakeUniMessage.sent[0].startswith("已订阅 抖音 · 作者")
 
 
 @pytest.mark.asyncio
@@ -194,7 +194,7 @@ async def test_subscribe_existing_target_adds_subscriber(
     snapshot = await store.snapshot()
     subscribers = snapshot["douyin:sec"].targets[target_key()].subscriber_ids
     assert subscribers == ["42", "43"]
-    assert "已加入抖音作者" in FakeUniMessage.sent[0]
+    assert FakeUniMessage.sent[0] == "已为 抖音 · 作者 开启更新提醒。"
 
 
 @pytest.mark.asyncio
@@ -207,7 +207,7 @@ async def test_subscribe_duplicate_reports_noop(
 
     await commands.subscribe(make_event(), Mock(), args("sec"))
 
-    assert "无需重复订阅" in FakeUniMessage.sent[0]
+    assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 作者，无需重复。"
 
 
 @pytest.mark.asyncio
@@ -222,7 +222,12 @@ async def test_subscribe_failure_reports_error(
 
     with pytest.raises(FinishedException):
         await commands.subscribe(make_event(), Mock(), args("???"))
-    assert FakeUniMessage.sent[0] == "订阅失败：链接无法识别"
+
+    assert FakeUniMessage.sent[0] == (
+        "订阅失败：没能识别这个链接\n"
+        "请发送作者主页链接、作品链接，或直接发作者 ID。\n"
+        "错误码 E-DY-INPUT"
+    )
 
 
 @pytest.mark.asyncio
@@ -232,7 +237,7 @@ async def test_unsubscribe_by_index(env: Any) -> None:
 
     await commands.unsubscribe(make_event(), Mock(), args("1"))
 
-    assert FakeUniMessage.sent == ["已取消订阅。"]
+    assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
     assert await store.snapshot() == {}
 
 
@@ -252,7 +257,9 @@ async def test_unsubscribe_without_subscriptions(env: Any) -> None:
     with pytest.raises(FinishedException):
         await commands.unsubscribe(make_event(), Mock(), args("1"))
 
-    assert FakeUniMessage.sent == ["当前会话没有爱播订阅。"]
+    assert FakeUniMessage.sent == [
+        "当前会话没有爱播订阅。\n发送 爱播订阅 <作者主页链接> 开始订阅。"
+    ]
 
 
 @pytest.mark.asyncio
@@ -269,7 +276,7 @@ async def test_unsubscribe_matches_local_id_without_network(
 
     await commands.unsubscribe(make_event(), Mock(), args("sec"))
 
-    assert FakeUniMessage.sent == ["已取消订阅。"]
+    assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
 
 
 @pytest.mark.asyncio
@@ -284,7 +291,7 @@ async def test_unsubscribe_falls_back_to_network_for_short_links(
     await commands.unsubscribe(make_event(), Mock(), args("https://v.douyin.com/x"))
 
     assert adapter.resolve_calls == 1
-    assert FakeUniMessage.sent == ["已取消订阅。"]
+    assert FakeUniMessage.sent == ["已取消 抖音 · 作者 的订阅。"]
 
 
 @pytest.mark.asyncio
@@ -297,7 +304,9 @@ async def test_unsubscribe_reports_missing_subscription(
 
     await commands.unsubscribe(make_event(user_id="99"), Mock(), args("sec"))
 
-    assert FakeUniMessage.sent == ["当前会话没有你的这个订阅。"]
+    assert FakeUniMessage.sent == [
+        "本会话没有你的这个订阅。发送 爱播订阅列表 可查看当前订阅。"
+    ]
 
 
 def test_target_subscriptions_group_by_platform() -> None:
@@ -522,3 +531,42 @@ async def test_replied_text_swallows_api_failure() -> None:
     bot.call_api = boom
 
     assert await reply.replied_text(event, bot) == ""
+
+
+def test_describe_failure_maps_categories_and_codes() -> None:
+    from nonebot_plugin_ifollow import formatting
+    from nonebot_plugin_ifollow.errors import PermanentError, TransientError
+
+    assert formatting.describe_failure(ValueError("坏链接")).code == "E-INPUT"
+    assert (
+        formatting.describe_failure(
+            PermanentError("抖音作者不存在或已注销：x"), platform="douyin"
+        ).code
+        == "E-DY-GONE"
+    )
+    assert (
+        formatting.describe_failure(
+            TransientError("抖音接口被风控拦截"), platform="douyin"
+        ).code
+        == "E-DY-RISK"
+    )
+    assert (
+        formatting.describe_failure(
+            TransientError("B 站投稿列表请求失败：超时"), platform="bilibili"
+        ).code
+        == "E-BILI-NET"
+    )
+    assert formatting.describe_failure(RuntimeError("???"), platform="douyin").code == (
+        "E-DY-UNKNOWN"
+    )
+
+
+def test_render_failure_has_no_stack_details() -> None:
+    from nonebot_plugin_ifollow import formatting
+
+    report = formatting.describe_failure(ValueError("x"))
+
+    text = formatting.render_failure("订阅", report)
+
+    assert "Traceback" not in text
+    assert text.endswith("错误码 E-INPUT")
