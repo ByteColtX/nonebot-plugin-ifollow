@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from nonebot.exception import FinishedException
-from nonebot_plugin_alconna.uniseg import Target
+from nonebot_plugin_alconna.uniseg import Reply, Target
 
 from nonebot_plugin_ifollow import app, commands
 from nonebot_plugin_ifollow.models import (
@@ -395,30 +395,57 @@ async def test_unsubscribe_superuser_cancels_legacy_entry(env: Any) -> None:
     assert await store.snapshot() == {}
 
 
-def test_quoted_author_parses_notice() -> None:
+@pytest.mark.asyncio
+async def test_quoted_author_parses_notice() -> None:
     """引用通知时能从首行认出平台和作者。"""
 
-    reply = Mock()
-    reply.extract_plain_text.return_value = (
+    reply = Reply(
+        "123",
         "抖音 · 01年的小女孩 发布了新作品\n"
         "────────────\n"
         "#泳装搭配指南👙\n"
         "\n"
         "00:06 · 720×1280 · 2.5 MB\n"
-        "2026-10-19 01:39"
+        "2026-10-19 01:39",
     )
 
-    assert commands.quoted_author(reply) == ("抖音", "01年的小女孩")
+    assert await commands.quoted_author(reply, Mock()) == ("抖音", "01年的小女孩")
 
 
-def test_quoted_author_returns_none_for_other_text() -> None:
+@pytest.mark.asyncio
+async def test_quoted_author_returns_none_for_other_text() -> None:
     """引用的不是爱播通知时认不出来。"""
 
-    reply = Mock()
-    reply.extract_plain_text.return_value = "随便聊两句\n没有通知"
+    reply = Reply("123", "随便聊两句\n没有通知")
 
-    assert commands.quoted_author(reply) is None
-    assert commands.quoted_author(None) is None
+    assert await commands.quoted_author(reply, Mock()) is None
+    assert await commands.quoted_author(None, Mock()) is None
+
+
+@pytest.mark.asyncio
+async def test_quoted_author_accepts_native_message() -> None:
+    """适配器原生 Message（没被包成 Reply）也能读。"""
+
+    class Native:
+        def extract_plain_text(self) -> str:
+            return "抖音 · 作者 发布了新作品"
+
+    assert await commands.quoted_author(Native(), Mock()) == ("抖音", "作者")
+
+
+@pytest.mark.asyncio
+async def test_quoted_author_fetches_from_get_msg() -> None:
+    """OneBot 的 reply 段里只有消息 ID，正文要回查 get_msg。"""
+
+    class FakeBot:
+        async def call_api(self, api: str, **kwargs: Any) -> dict[str, Any]:
+            assert api == "get_msg"
+            assert kwargs["message_id"] == 123
+            return {"message": "抖音 · 作者 发布了新作品\n────"}
+
+    reply = Reply("123")  # 和线上一样：msg 是 None
+
+    assert await commands.quoted_author(reply, FakeBot()) == ("抖音", "作者")
 
 
 @pytest.mark.asyncio
@@ -428,8 +455,7 @@ async def test_unsubscribe_from_quoted_notice(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)  # 订阅人是 42
     event = make_event(user_id="42")
-    event.reply = Mock()
-    event.reply.extract_plain_text.return_value = "抖音 · 作者 发布了新作品\n────"
+    event.reply = Reply("123", "抖音 · 作者 发布了新作品\n────")
 
     await commands.unsubscribe(event, Mock(), args(""))
 
@@ -444,8 +470,7 @@ async def test_unsubscribe_from_quoted_notice_unknown_author(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)
     event = make_event(user_id="42")
-    event.reply = Mock()
-    event.reply.extract_plain_text.return_value = "抖音 · 别人 发布了新作品\n────"
+    event.reply = Reply("123", "抖音 · 别人 发布了新作品\n────")
 
     with pytest.raises(FinishedException):
         await commands.unsubscribe(event, Mock(), args(""))
