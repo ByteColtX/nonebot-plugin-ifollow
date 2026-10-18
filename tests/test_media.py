@@ -33,30 +33,30 @@ def test_caption_deduplicates_repeated_text() -> None:
     )
 
 
-def test_media_messages_sends_single_video(tmp_path: Path) -> None:
+async def test_media_messages_sends_single_video(tmp_path: Path) -> None:
     video = write(tmp_path / "work", suffix=".mp4")
 
-    messages = media.media_messages([make_file(video)], 0, "抖音")
+    messages = await media.media_messages([make_file(video)], 0, "抖音")
 
     assert len(messages) == 1
     assert [segment.type for segment in messages[0]] == ["video"]
 
 
-def test_media_messages_treats_uppercase_suffix_as_video(tmp_path: Path) -> None:
+async def test_media_messages_treats_uppercase_suffix_as_video(tmp_path: Path) -> None:
     video = write(tmp_path / "work", suffix=".MP4")
 
-    messages = media.media_messages([make_file(video)], 0, "B站")
+    messages = await media.media_messages([make_file(video)], 0, "B站")
 
     assert [segment.type for segment in messages[0]] == ["video"]
 
 
-def test_media_messages_batches_images(tmp_path: Path) -> None:
+async def test_media_messages_batches_images(tmp_path: Path) -> None:
     files = [
         make_file(write(tmp_path / f"img{index}"))
         for index in range(media.IMAGE_BATCH_SIZE + 1)
     ]
 
-    messages = media.media_messages(files, 0, "B站")
+    messages = await media.media_messages(files, 0, "B站")
 
     assert [len(message) for message in messages] == [
         media.IMAGE_BATCH_SIZE,
@@ -65,36 +65,38 @@ def test_media_messages_batches_images(tmp_path: Path) -> None:
     assert all(segment.type == "image" for message in messages for segment in message)
 
 
-def test_media_messages_caps_total_media(tmp_path: Path) -> None:
+async def test_media_messages_caps_total_media(tmp_path: Path) -> None:
     files = [
         make_file(write(tmp_path / f"img{index}"))
         for index in range(media.MAX_MEDIA_COUNT + 5)
     ]
 
-    messages = media.media_messages(files, 0, "B站")
+    messages = await media.media_messages(files, 0, "B站")
 
     assert sum(len(message) for message in messages) == media.MAX_MEDIA_COUNT
 
 
-def test_media_messages_skips_oversized_file(tmp_path: Path) -> None:
+async def test_media_messages_skips_oversized_file(tmp_path: Path) -> None:
     big = write(tmp_path / "big", size=64)
 
-    assert media.media_messages([make_file(big)], max_bytes=8, label="抖音") == []
+    assert await media.media_messages([make_file(big)], max_bytes=8, label="抖音") == []
 
 
-def test_media_messages_skips_missing_file(tmp_path: Path) -> None:
+async def test_media_messages_skips_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "missing.png"
 
-    assert media.media_messages([make_file(missing)], 0, "抖音") == []
+    assert await media.media_messages([make_file(missing)], 0, "抖音") == []
 
 
-def test_media_messages_sends_live_photo_as_image_and_video(
+async def test_media_messages_sends_live_photo_as_image_and_video(
     tmp_path: Path,
 ) -> None:
     image = write(tmp_path / "live")
     video = write(tmp_path / "live-motion", suffix=".mp4")
 
-    messages = media.media_messages([make_file(image, video_path=video)], 0, "抖音")
+    messages = await media.media_messages(
+        [make_file(image, video_path=video)], 0, "抖音"
+    )
 
     assert [segment.type for message in messages for segment in message] == [
         "image",
@@ -102,12 +104,12 @@ def test_media_messages_sends_live_photo_as_image_and_video(
     ]
 
 
-def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
+async def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
     image = write(tmp_path / "img")
     result = SimpleNamespace(title="标题", content="")
     download = SimpleNamespace(media=[make_file(image)])
 
-    messages = media.build_messages(
+    messages = await media.build_messages(
         result,
         download,
         "https://www.bilibili.com/video/BV1AbcdefG12",
@@ -119,3 +121,19 @@ def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
         "标题\nhttps://www.bilibili.com/video/BV1AbcdefG12"
     )
     assert [segment.type for segment in messages[1]] == ["image"]
+
+
+async def test_media_segments_are_sent_as_raw_bytes(tmp_path: Path) -> None:
+    """协议端在另一台机器，媒体必须以 base64 发送而不是 file:// 路径。"""
+
+    video = write(tmp_path / "work", suffix=".mp4")
+    image = write(tmp_path / "img")
+
+    messages = await media.media_messages(
+        [make_file(video), make_file(image)], 0, "抖音"
+    )
+
+    segments = [segment for message in messages for segment in message]
+    assert segments
+    assert all(segment.raw for segment in segments)
+    assert all(segment.path is None for segment in segments)

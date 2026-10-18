@@ -3,6 +3,9 @@
 `parsehub <https://github.com/z-mio/ParseHub>`_ 负责解析作品详情并下载媒体，
 本模块只做「解析 → 下载 → 拼成 ``UniMessage``」三件事，渲染与发送交给 alconna。
 
+QQ 协议端通常跑在另一台机器上，``file://`` 路径它读不到（会报「路径不存在」），
+所以媒体统一读成字节以 base64 消息段发送，不依赖两边共享文件系统。
+
 parsehub 是同步库（内部用 requests），首次导入还要几秒（numpy/opencv），因此解析
 调用统一放进线程执行，``ParseHub`` 实例全局复用。
 """
@@ -91,15 +94,37 @@ def caption(result: Any, url: str) -> str:
     return "\n".join(parts)
 
 
-def _segments_for(path: Path) -> UniMessage:
-    """按后缀把本地媒体包装成图片或视频消息段。"""
+def _file_sizes(paths: list[Path]) -> dict[Path, int]:
+    """一次返回存在文件的体积，缺失的路径不出现在结果里。"""
 
+    sizes: dict[Path, int] = {}
+    for path in paths:
+        try:
+            sizes[path] = path.stat().st_size
+        except OSError:
+            continue
+    return sizes
+
+
+async def _segments_for(path: Path) -> UniMessage:
+    """把本地媒体读成字节，再包装成图片或视频消息段。
+
+    Args:
+        path: 本地媒体文件。
+
+    Returns:
+        图片或视频消息段（内容为 base64）。
+    """
+
+    raw = await asyncio.to_thread(path.read_bytes)
     if path.suffix.lower() in VIDEO_SUFFIXES:
-        return UniMessage.video(path=path)
-    return UniMessage.image(path=path)
+        return UniMessage.video(raw=raw)
+    return UniMessage.image(raw=raw)
 
 
-def media_messages(files: list[Any], max_bytes: int, label: str) -> list[UniMessage]:
+async def media_messages(
+    files: list[Any], max_bytes: int, label: str
+) -> list[UniMessage]:
     """把下载好的媒体拼成若干条消息：图片按批合并，视频单独发送。
 
     Args:
@@ -113,22 +138,30 @@ def media_messages(files: list[Any], max_bytes: int, label: str) -> list[UniMess
 
     images: list[Path] = []
     messages: list[UniMessage] = []
+    selected = files[:MAX_MEDIA_COUNT]
+    paths = [Path(str(getattr(file, "path", ""))) for file in selected]
+    live_paths = [
+        Path(str(file.video_path))
+        for file in selected
+        if getattr(file, "video_path", None)
+    ]
+    sizes = await asyncio.to_thread(_file_sizes, paths + live_paths)
 
-    def flush_images() -> None:
+    async def flush_images() -> None:
         while images:
             batch = images[:IMAGE_BATCH_SIZE]
             del images[:IMAGE_BATCH_SIZE]
             message = UniMessage()
             for path in batch:
-                message += _segments_for(path)
+                message += await _segments_for(path)
             messages.append(message)
 
-    for file in files[:MAX_MEDIA_COUNT]:
-        path = Path(str(getattr(file, "path", "")))
-        if not path.is_file():
+    for file, path in zip(selected, paths):
+        size = sizes.get(path)
+        if size is None:
             logger.debug(f"{label}媒体文件不存在，已跳过：{path}")
             continue
-        if max_bytes and path.stat().st_size > max_bytes:
+        if max_bytes and size > max_bytes:
             logger.warning(
                 f"{label}媒体 {path.name} 超过 {max_bytes // 1024 // 1024}MB，已跳过"
             )
@@ -136,25 +169,25 @@ def media_messages(files: list[Any], max_bytes: int, label: str) -> list[UniMess
 
         video_path = getattr(file, "video_path", None)
         if video_path:
-            flush_images()
+            await flush_images()
             live_path = Path(str(video_path))
-            messages.append(UniMessage.image(path=path))
-            live_size = live_path.stat().st_size if live_path.is_file() else None
+            messages.append(await _segments_for(path))
+            live_size = sizes.get(live_path)
             if live_size is not None and (not max_bytes or live_size <= max_bytes):
-                messages.append(UniMessage.video(path=live_path))
+                messages.append(await _segments_for(live_path))
             continue
 
         if path.suffix.lower() in VIDEO_SUFFIXES:
-            flush_images()
-            messages.append(_segments_for(path))
+            await flush_images()
+            messages.append(await _segments_for(path))
         else:
             images.append(path)
 
-    flush_images()
+    await flush_images()
     return messages
 
 
-def build_messages(
+async def build_messages(
     result: Any,
     download: Any,
     url: str,
@@ -176,7 +209,7 @@ def build_messages(
     """
 
     messages = [UniMessage(caption(result, url))]
-    messages.extend(media_messages(downloaded_files(download), max_bytes, label))
+    messages.extend(await media_messages(downloaded_files(download), max_bytes, label))
     return messages
 
 
@@ -208,6 +241,8 @@ async def media_messages_for(
     try:
         result = await parse_work(url, cookie)
         download = await result.download(workdir)
-        yield build_messages(result, download, url, label=label, max_bytes=max_bytes)
+        yield await build_messages(
+            result, download, url, label=label, max_bytes=max_bytes
+        )
     finally:
         await asyncio.to_thread(shutil.rmtree, workdir, ignore_errors=True)
