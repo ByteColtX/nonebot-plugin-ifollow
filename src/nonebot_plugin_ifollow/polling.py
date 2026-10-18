@@ -410,6 +410,7 @@ async def _deliver_work(
                     )
                     continue
                 _permanent_targets.discard(target_key)
+                _work_attempts.pop(_attempt_key(author, target_key, feed, work), None)
                 if work.bvid:
                     sent_bvids.setdefault(target_key, set()).add(work.bvid)
                 await _advance(store, author, target_key, feed, work)
@@ -450,7 +451,7 @@ async def _handle_target_failure(
 ) -> None:
     """按失败类型决定：跳过目标、重试作品，或放弃作品并推进游标。"""
 
-    attempt_key = (author.key, target_key, feed, work.work_id)
+    attempt_key = _attempt_key(author, target_key, feed, work)
     label = _target_label(author, target_key)
     if _is_permanent_target_error(exc):
         _work_attempts.pop(attempt_key, None)
@@ -574,6 +575,14 @@ def _earliest_cursor(author: AuthorSubscription, feed: str) -> Cursor | None:
 
 def _state(author_key: str) -> AuthorPollState:
     return _states.setdefault(author_key, AuthorPollState())
+
+
+def _attempt_key(
+    author: AuthorSubscription, target_key: str, feed: str, work: PlatformWork
+) -> tuple[str, str, str, str]:
+    """返回「某作品发往某目标」的重试计数键，失败与成功两条路径共用。"""
+
+    return (author.key, target_key, feed, work.work_id)
 
 
 def _prune_states(authors: dict[str, AuthorSubscription]) -> None:

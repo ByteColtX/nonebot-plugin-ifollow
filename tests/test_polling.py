@@ -464,3 +464,21 @@ async def test_catch_up_is_capped_to_newest_items(
     assert sent == ["w1", "w2", "w3", "w4", "w5"]
     assert prepared == sent
     assert cursor_of(await store.snapshot(), target_key) == Cursor("w5", 15)
+
+
+@pytest.mark.asyncio
+async def test_successful_retry_clears_attempt_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重试成功后不能留下重试计数，否则运行时状态只增不减。"""
+
+    store, author, (target_key,) = await make_author(tmp_path, "group")
+    sent: list[str] = []
+    patch_media(monkeypatch, sent)
+    work = make_work("new", 2)
+    polling._work_attempts[polling._attempt_key(author, target_key, "video", work)] = 2
+
+    await polling._deliver_feed(store, author, "video", [work], {target_key: set()})
+
+    assert sent == ["new"]
+    assert polling._work_attempts == {}
