@@ -115,8 +115,32 @@ def test_install_swaps_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     assert app.runtime() is instance
 
 
-def test_setup_registers_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_setup_wires_runtime_and_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nonebot_plugin_ifollow import commands
+
     monkeypatch.setattr(app.Settings, "load", classmethod(lambda _cls: SETTINGS))
+
     app.setup()
 
-    assert app.runtime().settings is SETTINGS
+    instance = app.runtime()
+    assert instance.settings is SETTINGS
+    assert isinstance(instance.poller, Poller)
+    assert instance.poller.store is instance.store
+    assert commands.SUBSCRIBE.priority == 5
+    assert commands.STATUS.block is True
+
+
+@pytest.mark.asyncio
+async def test_startup_loads_persisted_subscriptions(tmp_path: Path) -> None:
+    """启动时把磁盘上的订阅读进 store。"""
+
+    first = make_runtime(tmp_path)
+    await first.store.add_target("bilibili", "1", "作者", "k", {"id": "g"}, {})
+    await first.store.flush()
+
+    second = make_runtime(tmp_path)
+    second.poller.start = lambda: None  # type: ignore[method-assign]
+
+    await app.startup(second)
+
+    assert "bilibili:1" in await second.store.snapshot()

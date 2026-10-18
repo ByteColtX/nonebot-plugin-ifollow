@@ -112,7 +112,7 @@ def test_render_lists_disabled_author() -> None:
     assert "已停用（作者已注销）" in text
 
 
-def test_poller_status_text_uses_round_stats(tmp_path: object) -> None:
+def test_poller_status_text_uses_round_stats() -> None:
     store = SubscriptionStore()
     poller = Poller(store, SETTINGS)
     poller.stats = RoundStats(authors=1, due=1)
