@@ -6,8 +6,9 @@
 
 - 项目是 Python 3.12+ 的 NoneBot 插件，使用 `uv`；源码在 `src/`，测试在 `tests/`；`models.py` 使用
   `nonebot-plugin-localstore` 持久化订阅、目标、订阅人和作品游标。
-- `plugin.py` 负责命令、定时轮询、失败退避和消息发送；`*_platform.py` 负责作者与作品接口；
-  `media.py` 使用 ParseHub 解析并下载媒体，`douyin_media.py` / `bilibili_media.py` 传入平台 Cookie。
+- `plugin.py` 负责命令与启动装配；`polling.py` 负责轮询调度、失败退避和消息发送；
+  `*_platform.py` 负责作者与作品接口；`media.py` 使用 ParseHub 解析并下载媒体，
+  `douyin_media.py` / `bilibili_media.py` 传入平台 Cookie。
 ## Dev environment tips
 所有 Python 命令使用 `uv` 或 `uvx`，不直接使用 `python`、`pip` 或 `pipx`。
 
