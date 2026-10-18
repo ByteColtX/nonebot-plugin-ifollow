@@ -17,8 +17,10 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from nonebot import logger
 from nonebot_plugin_alconna import UniMessage
@@ -32,8 +34,38 @@ MAX_MEDIA_COUNT = 20
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".webm", ".flv", ".mkv"})
 """按后缀判断媒体是否为视频。"""
 
+SEPARATOR = "─" * 12
+"""文案里使用的分隔线，调用方拼订阅人提醒时也用它。"""
+
 _hub: Any | None = None
 _hub_lock = asyncio.Lock()
+
+
+@dataclass(frozen=True)
+class WorkMeta:
+    """一条作品在文案里需要的元信息。
+
+    Attributes:
+        author_name: 作者昵称。
+        create_time: 发布时间，Unix 秒。
+        duration_unit: parsehub 返回的时长单位，抖音是毫秒、B 站是秒。
+    """
+
+    author_name: str
+    create_time: int
+    duration_unit: Literal["ms", "s"] = "s"
+
+
+@dataclass
+class MediaBundle:
+    """下载并拼好的媒体，以及文案里要用的统计。"""
+
+    messages: list[UniMessage] = field(default_factory=list)
+    count: int = 0
+    total_bytes: int = 0
+    width: int = 0
+    height: int = 0
+    video_seconds: int = 0
 
 
 def _import_parsehub() -> Any:
@@ -81,17 +113,87 @@ def downloaded_files(download: Any) -> list[Any]:
     return [media]
 
 
-def caption(result: Any, url: str) -> str:
-    """拼出作品文案，标题与正文重复时只保留一次。"""
+def _work_text(result: Any) -> str:
+    """取作品文案，标题与正文重复时只保留一次。"""
 
     parts: list[str] = []
     for text in (getattr(result, "title", ""), getattr(result, "content", "")):
         cleaned = str(text or "").strip()
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
-    if url and url not in parts:
-        parts.append(url)
     return "\n".join(parts)
+
+
+def _duration_seconds(value: Any, unit: Literal["ms", "s"]) -> int:
+    """把 parsehub 的时长换算成秒。"""
+
+    try:
+        duration = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if duration <= 0:
+        return 0
+    return duration // 1000 if unit == "ms" else duration
+
+
+def _format_duration(seconds: int) -> str:
+    """把秒数格式化成 ``mm:ss`` 或 ``h:mm:ss``。"""
+
+    minutes, secs = divmod(max(0, seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_size(num_bytes: int) -> str:
+    """把字节数格式化成 MB / KB。"""
+
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / 1024 / 1024:.1f} MB"
+    return f"{max(1, round(num_bytes / 1024))} KB"
+
+
+def _detail_parts(bundle: MediaBundle) -> list[str]:
+    """拼出参数行：数量 / 时长 / 分辨率 / 体积。"""
+
+    parts: list[str] = []
+    if bundle.count > 1:
+        parts.append(
+            f"{bundle.count} 张" if not bundle.video_seconds else f"{bundle.count} 个"
+        )
+    if bundle.video_seconds:
+        parts.append(_format_duration(bundle.video_seconds))
+    if bundle.width and bundle.height:
+        parts.append(f"{bundle.width}×{bundle.height}")
+    if bundle.total_bytes:
+        parts.append(_format_size(bundle.total_bytes))
+    return parts
+
+
+def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
+    """拼出作品文案。
+
+    Args:
+        meta: 作者与发布时间。
+        result: parsehub 的解析结果。
+        bundle: 下载后的媒体统计。
+
+    Returns:
+        形如 ``作者 发布了新作品`` + 分隔线 + 文案 + 参数行 + 发布时间的多行文案。
+    """
+
+    lines = [f"{meta.author_name} 发布了新作品", SEPARATOR]
+    text = _work_text(result)
+    if text:
+        lines.extend([text, ""])
+    details = _detail_parts(bundle)
+    if details:
+        lines.append(" · ".join(details))
+    if meta.create_time:
+        stamp = datetime.fromtimestamp(meta.create_time).strftime("%Y-%m-%d %H:%M")
+        lines.append(stamp)
+    return "\n".join(lines)
 
 
 def _file_sizes(paths: list[Path]) -> dict[Path, int]:
@@ -123,21 +225,25 @@ async def _segments_for(path: Path) -> UniMessage:
 
 
 async def media_messages(
-    files: list[Any], max_bytes: int, label: str
-) -> list[UniMessage]:
+    files: list[Any],
+    max_bytes: int,
+    label: str,
+    duration_unit: Literal["ms", "s"] = "s",
+) -> MediaBundle:
     """把下载好的媒体拼成若干条消息：图片按批合并，视频单独发送。
 
     Args:
         files: parsehub 下载得到的媒体文件。
         max_bytes: 单个媒体的体积上限，``0`` 表示不限制。
         label: 日志里使用的平台名。
+        duration_unit: parsehub 返回的时长单位。
 
     Returns:
-        待发送的媒体消息列表。
+        媒体消息与文案统计。
     """
 
     images: list[Path] = []
-    messages: list[UniMessage] = []
+    bundle = MediaBundle()
     selected = files[:MAX_MEDIA_COUNT]
     paths = [Path(str(getattr(file, "path", ""))) for file in selected]
     live_paths = [
@@ -154,7 +260,7 @@ async def media_messages(
             message = UniMessage()
             for path in batch:
                 message += await _segments_for(path)
-            messages.append(message)
+            bundle.messages.append(message)
 
     for file, path in zip(selected, paths):
         size = sizes.get(path)
@@ -167,30 +273,43 @@ async def media_messages(
             )
             continue
 
+        bundle.count += 1
+        bundle.total_bytes += size
+        if not bundle.width and getattr(file, "width", 0):
+            bundle.width = int(file.width)
+            bundle.height = int(getattr(file, "height", 0) or 0)
+
         video_path = getattr(file, "video_path", None)
         if video_path:
             await flush_images()
             live_path = Path(str(video_path))
-            messages.append(await _segments_for(path))
+            bundle.messages.append(await _segments_for(path))
+            bundle.video_seconds += _duration_seconds(
+                getattr(file, "duration", 0), duration_unit
+            )
             live_size = sizes.get(live_path)
             if live_size is not None and (not max_bytes or live_size <= max_bytes):
-                messages.append(await _segments_for(live_path))
+                bundle.messages.append(await _segments_for(live_path))
+                bundle.total_bytes += live_size
             continue
 
         if path.suffix.lower() in VIDEO_SUFFIXES:
             await flush_images()
-            messages.append(await _segments_for(path))
+            bundle.messages.append(await _segments_for(path))
+            bundle.video_seconds += _duration_seconds(
+                getattr(file, "duration", 0), duration_unit
+            )
         else:
             images.append(path)
 
     await flush_images()
-    return messages
+    return bundle
 
 
 async def build_messages(
     result: Any,
     download: Any,
-    url: str,
+    meta: WorkMeta,
     *,
     label: str,
     max_bytes: int,
@@ -200,7 +319,7 @@ async def build_messages(
     Args:
         result: parsehub 的解析结果。
         download: parsehub 的下载结果。
-        url: 作品链接。
+        meta: 作者与发布时间。
         label: 日志里使用的平台名。
         max_bytes: 单个媒体的体积上限。
 
@@ -208,13 +327,15 @@ async def build_messages(
         第一条是文案，其后是媒体消息。
     """
 
-    messages = [UniMessage(caption(result, url))]
-    messages.extend(await media_messages(downloaded_files(download), max_bytes, label))
-    return messages
+    bundle = await media_messages(
+        downloaded_files(download), max_bytes, label, meta.duration_unit
+    )
+    return [UniMessage(caption(meta, result, bundle)), *bundle.messages]
 
 
 @asynccontextmanager
 async def media_messages_for(
+    meta: WorkMeta,
     url: str,
     *,
     cookie: str | None,
@@ -227,6 +348,7 @@ async def media_messages_for(
     媒体落在临时目录里，退出上下文时删除，因此调用方必须在上下文内把消息发完。
 
     Args:
+        meta: 作者与发布时间。
         url: 作品链接。
         cookie: 对应平台的 Cookie。
         label: 日志里使用的平台名。
@@ -242,7 +364,7 @@ async def media_messages_for(
         result = await parse_work(url, cookie)
         download = await result.download(workdir)
         yield await build_messages(
-            result, download, url, label=label, max_bytes=max_bytes
+            result, download, meta, label=label, max_bytes=max_bytes
         )
     finally:
         await asyncio.to_thread(shutil.rmtree, workdir, ignore_errors=True)

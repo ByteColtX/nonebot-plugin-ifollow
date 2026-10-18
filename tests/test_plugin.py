@@ -54,8 +54,10 @@ async def test_deliver_new_works_oldest_first_and_updates_cursor(
     )
     sent: list[str] = []
 
-    async def send(url: str, _platform: str, _target: Target) -> None:
-        sent.append(url)
+    async def send(
+        work: PlatformWork, _target: Target, _subscribers: list[str]
+    ) -> None:
+        sent.append(work.url)
 
     monkeypatch.setattr(plugin, "_send_work", send)
     works = [make_work("new-2", timestamp=3), make_work("new-1", timestamp=2)]
@@ -250,13 +252,22 @@ async def test_send_work_dispatches_to_platform_media(
             calls.append((self.message_url, target))
 
     @asynccontextmanager
-    async def fake_media(media_url: str):
-        yield [FakeMessage(media_url)]
+    async def fake_media(work: PlatformWork):
+        yield [FakeMessage(work.url)]
 
     monkeypatch.setattr(plugin, factory_name, fake_media)
     target = Target.group("group")
+    work = PlatformWork(
+        platform=platform,  # type: ignore[arg-type]
+        work_id="1",
+        url=url,
+        title="",
+        description="",
+        create_time=0,
+        author=AuthorInfo("123", "作者"),
+    )
 
-    await plugin._send_work(url, platform, target)
+    await plugin._send_work(work, target, [])
 
     assert calls == [(url, target)]
 
