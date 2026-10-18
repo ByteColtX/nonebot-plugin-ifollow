@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -144,7 +145,7 @@ def test_format_handle() -> None:
 
     assert format_handle(douyin) == "@handle"
     assert format_handle(bili) == "UID:123"
-    assert format_handle(AuthorSubscription("douyin", "sec", "作者")) == "未知"
+    assert format_handle(AuthorSubscription("douyin", "sec", "作者")) == ""
 
 
 @pytest.mark.asyncio
@@ -299,22 +300,85 @@ async def test_unsubscribe_reports_missing_subscription(
     assert FakeUniMessage.sent == ["当前会话没有你的这个订阅。"]
 
 
-def test_target_subscriptions_preserve_insertion_order() -> None:
-    """列表命令与序号取消依赖同一个稳定顺序。"""
+def test_target_subscriptions_group_by_platform() -> None:
+    """列表按平台分组；组内保持订阅先后。"""
 
     target = Target.group("group")
     key = make_target_key(target.dump())
-    first = AuthorSubscription(
-        "douyin", "1", "先订阅", {key: TargetSubscription(target.dump())}
+    bili = AuthorSubscription(
+        "bilibili", "b1", "B站作者", {key: TargetSubscription(target.dump())}
     )
-    second = AuthorSubscription(
-        "bilibili", "2", "后订阅", {key: TargetSubscription(target.dump())}
+    douyin_first = AuthorSubscription(
+        "douyin", "d1", "抖音先", {key: TargetSubscription(target.dump())}
     )
-    authors = {first.key: first, second.key: second}
+    douyin_second = AuthorSubscription(
+        "douyin", "d2", "抖音后", {key: TargetSubscription(target.dump())}
+    )
+    authors = {
+        bili.key: bili,
+        douyin_first.key: douyin_first,
+        douyin_second.key: douyin_second,
+    }
 
     items = commands.formatting.target_subscriptions(authors, key)
 
-    assert [author.author_id for author in items] == ["1", "2"]
+    assert [author.author_id for author in items] == ["d1", "d2", "b1"]
+
+
+def test_relative_time_buckets() -> None:
+    now = 1_700_000_000.0
+
+    assert commands.formatting.format_relative_time(0) == "未知"
+    assert commands.formatting.format_relative_time(int(now) - 5, now=now) == "刚刚"
+    assert (
+        commands.formatting.format_relative_time(int(now) - 300, now=now) == "5 分钟前"
+    )
+    assert (
+        commands.formatting.format_relative_time(int(now) - 7200, now=now) == "2 小时前"
+    )
+    assert (
+        commands.formatting.format_relative_time(int(now) - 86400 * 3, now=now)
+        == "3 天前"
+    )
+    old = int(now) - 86400 * 200
+    expected = datetime.fromtimestamp(old).strftime("%Y-%m-%d")
+    assert commands.formatting.format_relative_time(old, now=now) == expected
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_index_matches_displayed_order(env: Any) -> None:
+    """列表里第 1 条就是「取消订阅 1」删掉的那条，即使 B 站先订阅。"""
+
+    store, _ = env
+    key = target_key()
+    bili = AuthorSubscription(
+        "bilibili",
+        "b1",
+        "B站作者",
+        {key: TargetSubscription(Target.group("group").dump())},
+    )
+    douyin = AuthorSubscription(
+        "douyin",
+        "d1",
+        "抖音作者",
+        {key: TargetSubscription(Target.group("group").dump())},
+    )
+    authors = {bili.key: bili, douyin.key: douyin}
+    ordered = commands.formatting.target_subscriptions(authors, key)
+
+    await store.add_target(
+        "bilibili", "b1", "B站作者", key, Target.group("group").dump(), {}
+    )
+    await store.add_target(
+        "douyin", "d1", "抖音作者", key, Target.group("group").dump(), {}
+    )
+
+    await commands.unsubscribe(make_event(), Mock(), args("1"))
+
+    snapshot = await store.snapshot()
+    assert ordered[0].author_id == "d1"
+    assert "douyin:d1" not in snapshot
+    assert "bilibili:b1" in snapshot
 
 
 def test_match_subscription_uses_id_handle_and_url() -> None:
@@ -355,15 +419,23 @@ async def test_list_subscriptions_shows_authors(env: Any) -> None:
 
     await commands.list_subscriptions(make_event(), Mock())
 
-    assert "当前会话的爱播订阅" in FakeUniMessage.sent[0]
-    assert "抖音 作者（@handle）" in FakeUniMessage.sent[0]
+    assert FakeUniMessage.sent[0] == (
+        "爱播订阅（1 个）\n"
+        f"{commands.formatting.SEPARATOR}\n"
+        "抖音\n"
+        "1. 作者 @handle · 未知\n"
+        "\n"
+        "取消订阅：爱播取消订阅 <序号>"
+    )
 
 
 @pytest.mark.asyncio
 async def test_list_subscriptions_reports_empty(env: Any) -> None:
     await commands.list_subscriptions(make_event(), Mock())
 
-    assert FakeUniMessage.sent == ["当前会话没有爱播订阅。"]
+    assert FakeUniMessage.sent == [
+        "当前会话没有爱播订阅。\n发送 爱播订阅 <作者主页链接> 开始订阅。"
+    ]
 
 
 @pytest.mark.asyncio
