@@ -16,6 +16,9 @@ class Config(BaseModel):
     ifollow_douyin_cookie: str | None = None
     """可选的抖音网页 Cookie。"""
 
+    ifollow_media_max_mb: int = Field(default=90, ge=1, le=2048)
+    """单个媒体文件的体积上限，超出则跳过该媒体。"""
+
     ifollow_bilibili_cookie: str | None = None
     """可选的 B 站 Cookie。"""
 

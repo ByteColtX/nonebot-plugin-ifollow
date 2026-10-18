@@ -28,6 +28,7 @@ from .bilibili_platform import (
     fetch_author_profile as fetch_bilibili_profile,
 )
 from .config import config
+from .douyin_media import douyin_media_messages
 from .douyin_platform import (
     DouyinRequestError,
     fetch_latest_works,
@@ -43,7 +44,6 @@ from .models import (
     TargetSubscription,
     make_target_key,
 )
-from .parser import DouyinSubscribeParser
 from .platforms import AuthorInfo, PlatformWork
 
 store = SubscriptionStore()
@@ -473,16 +473,19 @@ def _cursor_for_all_targets(author: AuthorSubscription, feed: str) -> str | None
 
 
 async def _send_work(url: str, platform: str, target: Target) -> None:
-    """使用对应平台 parser 解析并发送内容。"""
+    """解析并发送一个作品；抖音走 parsehub，B 站仍走 parser。"""
 
-    parser = (
-        IFollowBilibiliParser() if platform == "bilibili" else DouyinSubscribeParser()
-    )
+    if platform == "douyin":
+        async with douyin_media_messages(url) as messages:
+            for message in messages:
+                await message.send(target=target)
+        return
+
+    parser = IFollowBilibiliParser()
     keyword, searched = parser.search_url(url)
     result = await parser.parse(keyword, searched)
     renderer = get_renderer(result.platform.name)(result)
-    messages = [message async for message in renderer.render_messages()]
-    for message in messages:
+    for message in [message async for message in renderer.render_messages()]:
         await message.send(target=target)
 
 
