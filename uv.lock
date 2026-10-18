@@ -1264,7 +1264,7 @@ wheels = [
 
 [[package]]
 name = "nonebot-plugin-ifollow"
-version = "2.0.2"
+version = "2.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "bilibili-api-python" },
