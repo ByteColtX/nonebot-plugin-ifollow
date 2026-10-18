@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import time
 from typing import Any
 
 import httpx
 from bilibili_api import Credential
 from bilibili_api.user import User
+from bilibili_api.utils.network import get_buvid
 from bilibili_api.video import Video
+from nonebot import logger
 
 from .config import config
 from .platforms import AuthorInfo, PlatformWork
@@ -28,6 +32,20 @@ BILIBILI_BROWSER_HEADERS = {
     "Referer": "https://www.bilibili.com/",
 }
 MAX_CATCHUP_PAGES = 5
+BILIBILI_APP_API = "https://app.bilibili.com"
+BILIBILI_APP_CREDENTIALS = (
+    ("1d8b6e7d45233436", "560c52ccd288fed045859ed18bffd973"),
+    ("783bbb7264451d82", "2653583c8873dea268ab9386918b1d65"),
+)
+BILIBILI_APP_BUILD = "8130300"
+BILIBILI_APP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 BiliDroid/8.13.0 (bbcallen@gmail.com) os/android "
+        "model/Pixel Build/UP1A"
+    ),
+}
+APP_PAGE_SIZE = 20
+JOINT_CREATION_SUFFIX = " 等联合创作"
 
 
 class BilibiliRequestError(RuntimeError):
@@ -36,6 +54,82 @@ class BilibiliRequestError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
+
+
+def bilibili_dynamics_enabled() -> bool:
+    """动态接口匿名不稳定，仅在配置 B 站 Cookie 时轮询。"""
+
+    return bool(config.ifollow_bilibili_cookie)
+
+
+async def warm_up_bilibili() -> None:
+    """预热 B 站匿名 buvid3/buvid4，失败不影响后续请求。"""
+
+    try:
+        await get_buvid()
+    except Exception:
+        logger.opt(exception=True).warning("B 站 buvid3 预热失败，后续请求将按需重试")
+
+
+def _sign_app_params(
+    params: dict[str, str], appkey: str, appsec: str
+) -> dict[str, str]:
+    """为 B 站 APP 接口参数追加 appkey、ts 和 sign。"""
+
+    signed = {
+        "appkey": appkey,
+        "build": BILIBILI_APP_BUILD,
+        "mobi_app": "android",
+        "platform": "android",
+        "ts": str(int(time.time())),
+        **params,
+    }
+    query = "&".join(f"{key}={signed[key]}" for key in sorted(signed))
+    signed["sign"] = hashlib.md5(f"{query}{appsec}".encode()).hexdigest()
+    return signed
+
+
+def _app_client() -> httpx.AsyncClient:
+    """创建 B 站 APP 接口使用的 HTTP 客户端。"""
+
+    return httpx.AsyncClient(headers=BILIBILI_APP_HEADERS, timeout=20)
+
+
+async def _app_get(
+    client: httpx.AsyncClient, path: str, params: dict[str, str]
+) -> dict[str, Any]:
+    """调用 B 站 APP 接口，失败时轮换 appkey，返回 data 字段。"""
+
+    last_error: Exception | None = None
+    for appkey, appsec in BILIBILI_APP_CREDENTIALS:
+        try:
+            response = await client.get(
+                f"{BILIBILI_APP_API}{path}",
+                params=_sign_app_params(params, appkey, appsec),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            last_error = exc
+            continue
+        if not isinstance(payload, dict):
+            last_error = BilibiliRequestError("B 站 APP 接口返回格式异常")
+            continue
+        code = payload.get("code")
+        if code != 0:
+            last_error = BilibiliRequestError(
+                f"B 站 APP 接口返回 {code}：{payload.get('message') or ''}",
+                retryable=code in (-500, -503, -509, -799),
+            )
+            continue
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            last_error = BilibiliRequestError("B 站 APP 接口缺少 data")
+            continue
+        return data
+    if isinstance(last_error, BilibiliRequestError):
+        raise last_error
+    raise _wrap_error("B 站 APP 接口请求失败", last_error or RuntimeError("未知错误"))
 
 
 def extract_bilibili_mid(value: str) -> str | None:
@@ -130,7 +224,34 @@ async def _resolve_short_link(value: str) -> str:
 
 
 async def fetch_author_profile(mid: str) -> AuthorInfo:
-    """获取 B 站作者资料。"""
+    """获取 B 站作者资料，优先使用匿名可用的 APP 接口。"""
+
+    try:
+        return await _fetch_author_profile_app(mid)
+    except BilibiliRequestError as exc:
+        logger.warning(f"B 站 APP 作者资料接口失败，回退网页接口：{exc}")
+    return await _fetch_author_profile_web(mid)
+
+
+async def _fetch_author_profile_app(mid: str) -> AuthorInfo:
+    """通过 APP 接口获取 B 站作者资料。"""
+
+    async with _app_client() as client:
+        data = await _app_get(client, "/x/v2/space", {"vmid": mid})
+    card = data.get("card")
+    if not isinstance(card, dict) or not card.get("mid"):
+        raise BilibiliRequestError("B 站 APP 作者资料返回格式异常")
+    return AuthorInfo(
+        author_id=str(card["mid"]),
+        name=str(card.get("name") or card["mid"]),
+        handle=str(card.get("mid") or ""),
+        avatar=str(card.get("face") or ""),
+        description=str(card.get("sign") or ""),
+    )
+
+
+async def _fetch_author_profile_web(mid: str) -> AuthorInfo:
+    """通过网页接口获取 B 站作者资料。"""
 
     try:
         info = await User(int(mid), credential=_credential()).get_user_info()
@@ -149,6 +270,81 @@ async def fetch_author_profile(mid: str) -> AuthorInfo:
 
 async def fetch_video_works(mid: str, cursor: str | None = None) -> list[PlatformWork]:
     """读取 B 站作者视频投稿，返回从新到旧的列表。"""
+
+    try:
+        return await _fetch_video_works_app(mid, cursor)
+    except BilibiliRequestError as exc:
+        logger.warning(f"B 站 APP 投稿接口失败，回退网页接口：{exc}")
+    return await _fetch_video_works_web(mid, cursor)
+
+
+async def _fetch_video_works_app(
+    mid: str, cursor: str | None = None
+) -> list[PlatformWork]:
+    """通过 APP 接口读取 B 站作者视频投稿。"""
+
+    works: list[PlatformWork] = []
+    seen: set[str] = set()
+    aid: int | None = None
+    async with _app_client() as client:
+        for _ in range(MAX_CATCHUP_PAGES if cursor else 1):
+            params = {
+                "vmid": mid,
+                "ps": str(min(config.ifollow_subscribe_count, APP_PAGE_SIZE)),
+                "order": "pubdate",
+            }
+            if aid is not None:
+                params["aid"] = str(aid)
+            data = await _app_get(client, "/x/v2/space/archive/cursor", params)
+            items = data.get("item") or []
+            if not isinstance(items, list):
+                raise BilibiliRequestError("B 站 APP 投稿列表缺少 item")
+            for item in items:
+                work = _parse_app_video_item(item, mid)
+                if work is None or work.work_id in seen:
+                    continue
+                seen.add(work.work_id)
+                works.append(work)
+            if not items or not data.get("has_next"):
+                break
+            if cursor and any(str(item.get("bvid") or "") == cursor for item in items):
+                break
+            last_item = items[-1] if isinstance(items[-1], dict) else {}
+            last_aid = last_item.get("param")
+            if not last_aid:
+                break
+            aid = int(last_aid)
+    works.sort(key=lambda work: (work.create_time, work.work_id), reverse=True)
+    return works
+
+
+def _parse_app_video_item(item: Any, mid: str) -> PlatformWork | None:
+    """把 APP 投稿条目转换为统一作品模型。"""
+
+    if not isinstance(item, dict):
+        return None
+    bvid = str(item.get("bvid") or "")
+    if not bvid:
+        return None
+    name = str(item.get("author") or "")
+    if name.endswith(JOINT_CREATION_SUFFIX):
+        name = name[: -len(JOINT_CREATION_SUFFIX)]
+    return PlatformWork(
+        platform="bilibili",
+        work_id=bvid,
+        bvid=bvid,
+        url=f"https://www.bilibili.com/video/{bvid}",
+        title=str(item.get("title") or ""),
+        description=str(item.get("subtitle") or ""),
+        create_time=int(item.get("ctime") or 0),
+        author=AuthorInfo(author_id=mid, name=name, handle=mid),
+    )
+
+
+async def _fetch_video_works_web(
+    mid: str, cursor: str | None = None
+) -> list[PlatformWork]:
+    """通过网页接口读取 B 站作者视频投稿。"""
 
     user = User(int(mid), credential=_credential())
     works: list[PlatformWork] = []

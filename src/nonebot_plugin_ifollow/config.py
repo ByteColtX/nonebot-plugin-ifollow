@@ -20,7 +20,7 @@ class Config(BaseModel):
     """单个媒体文件的体积上限，超出则跳过该媒体。"""
 
     ifollow_bilibili_cookie: str | None = None
-    """可选的 B 站 Cookie。"""
+    """可选的 B 站 Cookie（SESSDATA）；配置后才会轮询动态。"""
 
 
 config = get_plugin_config(Config)

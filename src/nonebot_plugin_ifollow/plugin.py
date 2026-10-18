@@ -18,10 +18,12 @@ from nonebot_plugin_apscheduler import scheduler
 from .bilibili_media import bilibili_media_messages
 from .bilibili_platform import (
     BilibiliRequestError,
+    bilibili_dynamics_enabled,
     fetch_dynamic_works,
     fetch_video_works,
     is_bilibili_value,
     resolve_bilibili_author,
+    warm_up_bilibili,
 )
 from .bilibili_platform import (
     fetch_author_profile as fetch_bilibili_profile,
@@ -81,6 +83,19 @@ async def load_subscriptions_on_startup() -> None:
     authors = await store.snapshot()
     target_count = sum(len(author.targets) for author in authors.values())
     logger.info(f"成功加载 {len(authors)} 个爱播作者订阅，覆盖 {target_count} 个会话。")
+
+
+@driver.on_startup
+async def warm_up_bilibili_on_startup() -> None:
+    """订阅含 B 站作者时预热匿名指纹，未配置 Cookie 时跳过动态。"""
+
+    authors = await store.snapshot()
+    if not any(author.platform == "bilibili" for author in authors.values()):
+        return
+    if not bilibili_dynamics_enabled():
+        logger.info("未配置 B 站 Cookie，动态轮询已跳过，仅推送视频")
+        return
+    await warm_up_bilibili()
 
 
 @on_command("爱播帮助", aliases={"帮助爱播"}, priority=5, block=True).handle()
@@ -457,7 +472,11 @@ async def _fetch_feed(
 
 
 def _feeds_for_platform(platform: Platform) -> tuple[str, ...]:
-    return ("video",) if platform == "douyin" else ("video", "dynamic")
+    if platform == "douyin":
+        return ("video",)
+    if bilibili_dynamics_enabled():
+        return ("video", "dynamic")
+    return ("video",)
 
 
 def _cursor_for_all_targets(author: AuthorSubscription, feed: str) -> str | None:

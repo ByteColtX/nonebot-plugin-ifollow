@@ -31,8 +31,8 @@ parsehub 解析 → 下载媒体到临时目录 → 拼成「文案 + 媒体」�
   opus 动态保留接口返回的 `jump_url`。
 - **Cookie 只用于动态和兜底**：`IFOLLOW_BILIBILI_COOKIE` 传给 parsehub，用于动态详情和
   受限接口；视频取流不读该 Cookie。
-- **`bilibili-api-python` 保留为直接依赖**：`bilibili_platform.py` 仍用
-  `Credential` / `User` / `Video` 拉取作者、投稿和动态，移除 parser 后必须显式声明。
+- **`bilibili-api-python` 保留为直接依赖**：动态列表和网页兜底仍用 `Credential` / `User` / `Video`，
+  移除 parser 后必须显式声明。
 - **不在媒体层吞异常**：解析或下载失败直接抛出，交给现有的发送重试和游标保留逻辑。
 
 ## 已知限制
@@ -45,5 +45,4 @@ parsehub 解析 → 下载媒体到临时目录 → 拼成「文案 + 媒体」�
 
 ## 后续
 
-`research-bilibili-stable-fetch` 分支上的 APP 接口拉取改进尚未合入本分支；合入后
-`bilibili_platform.py` 的视频与作者资料将不再依赖网页接口。
+拉取侧已改为 APP 接口优先，细节见 `bilibili-fetch.SPEC.md`。
