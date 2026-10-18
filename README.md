@@ -15,174 +15,72 @@
 
 ## 📖 介绍
 
-订阅抖音和 B 站作者的新作品及动态，并将作品分享链接交给
-[parsehub](https://github.com/z-mio/ParseHub) 解析、下载和发送。
-支持抖音作者主页链接、作者主页短链、`sec_user_id`，以及 B 站作者主页和作品链接，
-每个会话独立记录已发送作品。
+订阅抖音和 B 站作者，有新作品或动态时推到群聊 / 私聊。插件只负责发现更新，媒体交给
+[ParseHub](https://github.com/z-mio/ParseHub) 解析、下载并发送。
+
+- **多平台**：抖音（主页 / 短链 / `sec_user_id`）、B 站（主页 / BV / AV / b23.tv）
+- **按会话独立**：每个群 / 私聊各自记录推送游标，同一个作者可以订阅到多个会话
+- **不补发历史**：首次订阅只记录当前最新一条，之后只推新内容
+- **失败可控**：作者级退避、作品级重试 3 次、目标群不可用只跳过该会话
+- **下载前控体积**：视频类媒体先探远端体积，超过上限直接不下载
+- **零配置可跑**：抖音匿名即可轮询；B 站不配 Cookie 时只推视频（固定 720p）
 
 ## 💿 安装
 
-<details open>
-<summary>使用 nb-cli 安装</summary>
-在 nonebot2 项目的根目录下打开命令行, 输入以下指令即可安装
+使用 nb-cli 安装：
 
-    nb plugin install nonebot-plugin-ifollow --upgrade
-使用 **pypi** 源安装
+```bash
+nb plugin install nonebot-plugin-ifollow --upgrade
+```
 
-    nb plugin install nonebot-plugin-ifollow --upgrade -i "https://pypi.org/simple"
-使用**清华源**安装
+使用 uv 安装：
 
-    nb plugin install nonebot-plugin-ifollow --upgrade -i "https://pypi.tuna.tsinghua.edu.cn/simple"
+```bash
+uv add nonebot-plugin-ifollow
+```
 
+安装仓库 main 分支：
 
-</details>
+```bash
+uv add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
+```
 
-<details>
-<summary>使用包管理器安装</summary>
-在 nonebot2 项目的插件目录下, 打开命令行, 根据你使用的包管理器, 输入相应的安装命令
+用 uv 安装后还需要在 nonebot2 项目根目录的 `pyproject.toml` 里注册插件（nb-cli 会自动完成这一步）：
 
-<details open>
-<summary>uv</summary>
-
-    uv add nonebot-plugin-ifollow
-安装仓库 main 分支
-
-    uv add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
-</details>
-
-<details>
-<summary>pdm</summary>
-
-    pdm add nonebot-plugin-ifollow
-安装仓库 main 分支
-
-    pdm add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
-</details>
-<details>
-<summary>poetry</summary>
-
-    poetry add nonebot-plugin-ifollow
-安装仓库 main 分支
-
-    poetry add git+https://github.com/ByteColtX/nonebot-plugin-ifollow@main
-</details>
-
-打开 nonebot2 项目根目录下的 `pyproject.toml` 文件, 在 `[tool.nonebot]` 部分追加写入
-
-    plugins = ["nonebot_plugin_ifollow"]
-
-</details>
-
-<details>
-<summary>使用 nbr 安装(使用 uv 管理依赖可用)</summary>
-
-[nbr](https://github.com/fllesser/nbr) 是一个基于 uv 的 nb-cli，可以方便地管理 nonebot2
-
-    nbr plugin install nonebot-plugin-ifollow
-使用 **pypi** 源安装
-
-    nbr plugin install nonebot-plugin-ifollow -i "https://pypi.org/simple"
-使用**清华源**安装
-
-    nbr plugin install nonebot-plugin-ifollow -i "https://pypi.tuna.tsinghua.edu.cn/simple"
-
-</details>
-
+```toml
+[tool.nonebot]
+plugins = ["nonebot_plugin_ifollow"]
+```
 
 ## ⚙️ 配置
 
-在 nonebot2 项目的`.env`文件中添加下表中的可选配置。平台网页接口可能随时调整，接口受限时可配置有效 Cookie。
+在 nonebot2 项目的 `.env` 文件中添加下表配置，全部可选：
 
 | 配置项 | 必填 | 默认值 | 说明 |
-| :--- | :---: | :---: | :--- |
-| `IFOLLOW_SUB_INTERVAL` | 否 | `1800` | 每个作者的轮询周期，单位为秒，最小 30 秒 |
-| `IFOLLOW_SUB_MAX_ITEMS` | 否 | `5` | 每个作者每个 feed 一次轮询最多补发的作品数，范围 1-50 |
-| `IFOLLOW_MEDIA_MAX_MB` | 否 | `100` | 单个媒体文件的体积上限（抖音、B 站），超出则跳过该媒体；视频类会在下载前先探测 |
-| `IFOLLOW_USE_BASE64` | 否 | `false` | 是否把媒体编码成 base64 发送，仅协议端与插件不在同一台机器时需要开启 |
-| `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，通常无需填写，详见下方说明 |
-| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie（SESSDATA）；配置后才会轮询动态，视频固定 720p |
+| :--- | :---: | :--- | :--- |
+| `IFOLLOW_SUB_INTERVAL` | 否 | `1800` | 每个作者的轮询周期（秒），最小 30 |
+| `IFOLLOW_SUB_MAX_ITEMS` | 否 | `5` | 每作者每 feed 每轮最多补发的作品数，范围 1-50 |
+| `IFOLLOW_MEDIA_MAX_MB` | 否 | `100` | 单个媒体体积上限（MB），视频类会在下载前先探测 |
+| `IFOLLOW_USE_BASE64` | 否 | `false` | 媒体编码成 base64 发送，仅协议端与插件不同机时需要 |
+| `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，匿名即可轮询，通常无需填写 |
+| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie（SESSDATA）；配置后才会轮询动态 |
 
-示例：
+- **周期**：每个作者按自己的节奏到期，订阅 30 个作者也不会互相拖慢；扫描间隔取周期的四分之一
+  （15 秒 ~ 5 分钟），抓取并发 4。默认 30 分钟按「多数作者月更」定，34 个作者约 1600 次请求/天。
+- **补发上限**：不是页大小。停机很久后回来最多补发最新 5 条，更早的跳过（日志里有 warning）。
+- **媒体传输**：默认把本地路径（`file://`）交给协议端，插件不读字节也不编码；协议端在另一台机器、
+  读不到同一路径时才开 `IFOLLOW_USE_BASE64`。
+- **旧配置**：`IFOLLOW_SUBSCRIBE_INTERVAL` / `IFOLLOW_SUBSCRIBE_COUNT` 已废弃且不再读取，请改成新名字。
+- **数据格式**：订阅数据为 v3，不兼容旧版本；升级需清空插件数据目录里的 `subscriptions.json` 并重新订阅。
 
-```dotenv
-IFOLLOW_SUB_INTERVAL=1800
-IFOLLOW_SUB_MAX_ITEMS=5
-IFOLLOW_MEDIA_MAX_MB=100
-IFOLLOW_DOUYIN_COOKIE="你的抖音网页 Cookie"
-IFOLLOW_BILIBILI_COOKIE="你的 B 站 Cookie"
-```
+### 关于 Cookie
 
-**旧版配置项已废弃**：`IFOLLOW_SUBSCRIBE_INTERVAL` / `IFOLLOW_SUBSCRIBE_COUNT` 不再读取，
-请改为 `IFOLLOW_SUB_INTERVAL` / `IFOLLOW_SUB_MAX_ITEMS`，否则会回退到默认值。
+抖音接口要求 `a_bogus` 签名 + 自动注册的 `ttwid`，**匿名即可轮询**，`IFOLLOW_DOUYIN_COOKIE` 只是加强项
+（其中的 `ttwid` 会被自动注册值覆盖）。
 
-`IFOLLOW_SUB_INTERVAL` 是**每个作者**的轮询周期：每个作者按自己的节奏到期，
-所以订阅 30 个作者也不会让实际间隔变长。扫描间隔跟着周期走（周期的四分之一，
-夹在 15 秒到 5 分钟之间），同时最多抓取 4 个作者。
-
-默认 30 分钟是按「多数作者月更、插件不要求实时」定的：34 个作者约 1600 次请求/天
-（每轮通常只取一页，配了 B 站 Cookie 时视频与动态各拉一次），新作品最晚晚半小时推送。
-想更省请求可以调到 `3600` 或更大，正确性不受影响，只是延迟和失败重试间隔一起变长。
-
-`IFOLLOW_SUB_MAX_ITEMS` 是**补发上限**，不是页大小：一轮轮询最多推送多少条新作品。
-插件不指定分页条数，页大小用平台默认值；停机很久后回来时，最多补发最新 5 条，
-更早的作品会被跳过（日志里有 warning 说明跳过了几条）。日常一轮通常只有 0~2 条新作品，
-默认值不会影响正常推送。
-
-插件使用 `parsehub` 解析并下载媒体，B 站视频固定按 720p 取流。订阅数据由
-`nonebot-plugin-localstore` 持久化到插件数据目录，不要把 Cookie 或订阅数据提交到代码仓库。
-
-订阅数据格式为 **v3**，不兼容旧版本：升级时需要清空插件数据目录里的 `subscriptions.json`
-并重新订阅。
-
-### 关于媒体传输方式
-
-默认把下载好的媒体以本地路径（`file://`）交给协议端，插件不读字节也不编码，大视频不会拖慢
-消息处理。**只有协议端与插件不在同一台机器、读不到同一个路径时**（比如协议端跑在另一台
-服务器或另一个容器里，报「路径不存在」），才需要开启：
-
-```dotenv
-IFOLLOW_USE_BASE64=true
-```
-
-开启后媒体会编码成 base64 发送，单个文件的体积上限由 `IFOLLOW_MEDIA_MAX_MB` 控制。
-
-### 关于抖音 Cookie
-
-抖音作品接口要求每次请求都带 `a_bogus` 签名、`ttwid` Cookie 与 `x-tt-argus` 请求头，插件会
-自动注册 ttwid 并在被风控时重新注册，因此 **匿名即可正常轮询，无需手工配置 Cookie**。
-
-`IFOLLOW_DOUYIN_COOKIE` 只是加强项：当接口开始校验登录态时可填写浏览器 Cookie。注意其中
-的 `ttwid` 会被插件自动注册的值覆盖，其余字段（如 `msToken`、`UIFID`、`sessionid`）会原样透传。
-
-获取方式：桌面 Chrome 登录 <https://www.douyin.com>，按 `F12` 打开开发者工具，切到 **Network**，
-过滤 `aweme/v1/web/aweme/post`，点开任意请求，右键 **Copy → Copy as cURL**，把其中
-`-H 'Cookie: ...'` 的整段值填入配置即可。`document.cookie` 拿不到 HttpOnly 的 `ttwid`/`UIFID`，
-不要用它。
-
-### 关于 B 站接口、Cookie 与画质
-
-B 站作者资料和视频投稿走 APP 端接口（只校验 `appkey + sign`），匿名即可稳定获取，不需要 Cookie；
-APP 接口失败时会回退网页接口。动态没有对应的 APP 接口，匿名态容易触发 `-352` 风控，因此
-**只有配置了 `IFOLLOW_BILIBILI_COOKIE` 才会轮询动态**；未配置时只推送视频。
-
-视频发送由 parsehub 完成，接口固定按 720p（`qn=64`）取流，配置 Cookie 不会提升画质。
-动态以 `t.bilibili.com/{id}` 交给 parsehub，opus 动态沿用接口返回的 `www.bilibili.com/opus/{id}`。
-
-`buvid3` / `buvid4` 无需手动填写：配置 Cookie 后插件会在启动时自动获取，网页兜底请求也会自动补充。
-
-需要动态推送时，按下面任一方式获取 Cookie：
-
-1. 匿名指纹（不登录，只提升网页接口成功率）：请求 `https://api.bilibili.com/x/frontend/finger/spi`，
-   把返回的 `b_3`、`b_4` 拼成 `buvid3=...; buvid4=...`。
-2. 登录 Cookie（动态最稳）：浏览器登录 `https://www.bilibili.com`，按 F12 打开开发者工具，
-   在“应用/存储 → Cookie → https://www.bilibili.com”中复制 `SESSDATA`；也可以在“网络”面板
-   任意请求的请求头中复制整段 `Cookie`。
-
-```dotenv
-IFOLLOW_BILIBILI_COOKIE="SESSDATA=...; buvid3=...; buvid4=..."
-```
-
-Cookie 等同于账号控制权，建议使用小号，不要提交到代码仓库；退出登录或修改密码后 Cookie 会失效。
+B 站作者资料与视频投稿走 APP 接口，匿名可用；**动态没有稳定的匿名接口**，只有配置了
+`IFOLLOW_BILIBILI_COOKIE` 才会轮询动态。获取方式：浏览器登录后按 F12 → Network → 复制请求头里的整段
+`Cookie`。Cookie 等同于账号控制权，建议用小号，不要提交到仓库。
 
 ## 🎉 使用
 
@@ -193,7 +91,7 @@ Cookie 等同于账号控制权，建议使用小号，不要提交到代码仓�
 | `爱播帮助` | 群员 | 否 | 群聊、私聊 | 查看帮助 |
 | `爱播订阅 <作者主页或作品链接>` | 群员 | 否 | 群聊、私聊 | 订阅一个抖音或 B 站作者 |
 | `爱播订阅列表` | 群员 | 否 | 群聊、私聊 | 查看当前会话的订阅 |
-| `爱播取消订阅 <序号、作者 ID、昵称或主页/作品链接>` | 群员 | 否 | 群聊、私聊 | 取消一个作者订阅 |
+| `爱播取消订阅 <序号、作者 ID、昵称或链接>` | 群员 | 否 | 群聊、私聊 | 取消一个作者订阅 |
 | `爱播状态` | 超级用户 | 否 | 群聊、私聊 | 查看轮询健康度与各作者状态 |
 
 ### 订阅作者
@@ -206,52 +104,61 @@ Cookie 等同于账号控制权，建议使用小号，不要提交到代码仓�
 爱播订阅 https://www.bilibili.com/video/BV1xxxxxxxxx
 ```
 
-也可以引用包含抖音或 B 站作品分享链接的消息后发送 `爱播订阅`。插件会读取被引用的原消息，
-从作品页解析作者主页并完成订阅；该功能需要当前适配器支持 `get_msg` 接口。
+也可以引用含链接的消息后发送 `爱播订阅`（需要适配器支持 `get_msg`）。
 
-```text
-群友A：4.38 复制打开抖音，看看【小葵日记的作品】喵喵喵 https://v.douyin.com/0l0Sigjl5jM/
-群友A（引用上一条消息）：爱播订阅
-```
-
-首次订阅只记录当前最新作品或动态，不会补发历史内容。之后轮询发现新内容时，插件会将作品链接交给
-`parsehub` 解析、下载并发送到订阅会话。
+首次订阅只记录当前最新作品或动态，不补发历史；之后发现新内容时，插件把作品链接交给 ParseHub
+解析、下载并发送到订阅会话。
 
 ### 管理订阅
 
-```text
-爱播订阅列表
-爱播取消订阅 1
-爱播取消订阅 MS4wLjABAAAA...
-爱播取消订阅 呆呆丸
-爱播取消订阅 https://space.bilibili.com/123456
-```
+取消订阅优先在本地匹配：序号、作者 ID、抖音号 / B 站 UID、主页链接里的 ID、唯一昵称都不联网，
+作者注销或接口被风控时也能取消；只有短链和作品链接才请求平台。昵称重名请改用序号。
 
-取消时优先在本地匹配：序号、作者 ID、抖音号 / B 站 UID、主页链接里的 ID、唯一的昵称都不联网，
-作者注销或接口被风控时也能取消；只有短链和作品链接（本地无法得知作者）才需要请求平台。
-昵称重名时请改用序号。纯数字输入始终按序号解释。
+### 失败处理
 
-订阅状态按平台、作者和目标会话保存；同一个作者可以订阅到多个会话，各会话分别记录推送游标。
-
-订阅或取消失败时只回一句人话原因、一条建议和一个错误码（如 `E-DY-RISK`），不会把异常堆栈
-发到群里；把错误码贴出来就能在日志里定位到完整堆栈。
-
-### 轮询与失败处理
-
-插件启动后立即开始首轮轮询，之后每个作者按自己的周期到期。失败按作者与作品两级处理：
-
-- 作者不存在或已注销 —— 停用该作者（重启插件后会重新尝试），`爱播状态` 里标「已停用」；
+- 作者不存在或已注销 —— 停用该作者（重启后重新尝试），`爱播状态` 里标「已停用」；
 - 作者接口暂时失败（网络、风控、限流）—— 该作者指数退避，30 秒起、上限 5 分钟；
-- 作品已删除、不可见、平台不支持 —— 立即放弃该作品并推进游标，记一条 warning；
-- 网络、限流、下载失败 —— 下个周期重试，连续 3 次仍失败则放弃并推进游标；
+- 作品已删除、不可见、平台不支持 —— 立即放弃该作品并推进游标；
+- 网络、限流、下载失败 —— 下个周期重试，连续 3 次后放弃并推进游标；
 - 机器人被踢出群、群不存在 —— 只跳过该会话，不影响同一作品的其他会话。
 
-视频类媒体（视频、动图、实况照片）会在下载前先探测远端体积，超过 `IFOLLOW_MEDIA_MAX_MB`
-的直接不下载；探测失败或服务端不返回长度时，退回下载后的体积检查。
+订阅或取消失败时只回一句人话原因、一条建议和一个错误码（如 `E-DY-RISK`），不会把异常堆栈发到群里；
+把错误码贴出来就能在日志里定位到完整堆栈。
 
-放弃意味着这个作品不会重发，后续新作品不受影响。超级用户发送 `爱播状态` 可以查看连续失败
-次数、最近一次错误与下次重试时间，已停用的作者会单独标出。
+## 🛠️ 开发
 
-### 🎨 效果图
+```bash
+uv sync
+uv run pytest -q                # 只跑测试
+uv run poe test                 # 覆盖率门禁 90%（CI 同款）
+uv run ruff check . && uv run ruff format --check .
+uv run basedpyright
+```
 
-暂无示例图。
+### 代码结构
+
+```
+src/nonebot_plugin_ifollow/
+├── __init__.py / app.py / settings.py    # 元数据、装配、唯一读配置的地方
+├── commands.py / formatting.py / reply.py / style.py
+├── platforms.py / adapters.py / pagination.py / errors.py
+├── douyin_platform.py / douyin_abogus.py
+├── bilibili_platform.py
+├── media.py / douyin_media.py / bilibili_media.py
+├── models.py                             # 订阅存储（v3，批量写）
+└── poller.py / delivery.py / failures.py / status.py
+```
+
+主要模块旁有 `*.SPEC.md`（轮询子系统、存储、媒体、抖音 / B 站拉取与发送），记录边界、契约与
+决策；`AGENTS.md` 是给 coding agent 的约定。
+
+## 📄 许可
+
+[MIT](LICENSE)
+
+## 🙏 致谢
+
+- [z-mio/ParseHub](https://github.com/z-mio/ParseHub)：媒体解析与下载能力全部来自这个项目
+- [fllesser/nonebot-plugin-template](https://github.com/fllesser/nonebot-plugin-template)：插件标识与 README 结构参考
+- [Johnserf-Seed/f2](https://github.com/Johnserf-Seed/f2)：抖音 `a_bogus` 签名算法参考（Apache-2.0）
+- [Nemo2011/bilibili-api](https://github.com/Nemo2011/bilibili-api)：B 站网页接口兜底与 `buvid3` 预热
