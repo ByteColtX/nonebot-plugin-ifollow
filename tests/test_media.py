@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from nonebot_plugin_ifollow import media
 
 CREATE_TIME = 1791073726
@@ -196,3 +198,141 @@ async def test_media_segments_switch_to_base64_when_enabled(tmp_path: Path) -> N
     assert segment.raw is None
     assert segment.url is not None
     assert segment.url.startswith("base64://")
+
+
+class FakeRef:
+    """媒体引用替身，只需要探测用到的字段。"""
+
+    def __init__(
+        self, url: str, ext: str = "mp4", video_url: str | None = None
+    ) -> None:
+        self.url = url
+        self.ext = ext
+        self.video_url = video_url
+
+
+async def test_oversized_video_is_dropped_before_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """视频体积超限时直接剔除，不再下载。"""
+
+    async def fake_probe(_client: Any, _url: str) -> int:
+        return 10**9
+
+    monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
+    result = SimpleNamespace(media=[FakeRef("https://cdn/video.mp4")])
+
+    await media._drop_oversized_media(result, 1024, "抖音")
+
+    assert result.media is None
+
+
+async def test_unknown_size_keeps_media_for_post_download_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """探测失败或拿不到长度时保留媒体，交给下载后检查。"""
+
+    async def fake_probe(_client: Any, _url: str) -> None:
+        return None
+
+    monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
+    ref = FakeRef("https://cdn/video.mp4")
+    result = SimpleNamespace(media=[ref])
+
+    await media._drop_oversized_media(result, 1024, "抖音")
+
+    assert result.media == [ref]
+
+
+async def test_images_are_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """图片不探测，避免图集多打请求。"""
+
+    probed: list[str] = []
+
+    async def fake_probe(_client: Any, url: str) -> int:
+        probed.append(url)
+        return 10**9
+
+    monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
+    ref = FakeRef("https://cdn/image.jpg", ext="jpg")
+    result = SimpleNamespace(media=[ref])
+
+    await media._drop_oversized_media(result, 1024, "抖音")
+
+    assert probed == []
+    assert result.media == [ref]
+
+
+async def test_live_photo_probes_motion_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    """实况照片要探测动图部分，超限则整条剔除。"""
+
+    async def fake_probe(_client: Any, url: str) -> int:
+        return 10**9 if url.endswith(".mp4") else 10
+
+    monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
+    ref = FakeRef("https://cdn/live.jpg", ext="jpg", video_url="https://cdn/live.mp4")
+    result = SimpleNamespace(media=[ref])
+
+    await media._drop_oversized_media(result, 1024, "抖音")
+
+    assert result.media is None
+
+
+async def test_mixed_album_keeps_media_within_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """图集里只剔除超限的那条，其余保持原顺序。"""
+
+    async def fake_probe(_client: Any, url: str) -> int:
+        return 10**9 if url.endswith("big.mp4") else 10
+
+    monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
+    image = FakeRef("https://cdn/a.jpg", ext="jpg")
+    big = FakeRef("https://cdn/big.mp4")
+    small = FakeRef("https://cdn/c.mp4")
+    result = SimpleNamespace(media=[image, big, small])
+
+    await media._drop_oversized_media(result, 1024, "抖音")
+
+    assert result.media == [image, small]
+
+
+async def test_media_messages_for_skips_download_when_everything_is_too_big(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全部媒体都超限时不下载，只发文案。"""
+
+    media_at_download: list[Any] = []
+
+    class FakeResult:
+        title = "标题"
+        content = ""
+
+        def __init__(self) -> None:
+            self.media = [FakeRef("https://cdn/video.mp4")]
+
+        async def download(self, path: Path) -> SimpleNamespace:
+            del path
+            media_at_download.append(self.media)
+            return SimpleNamespace(media=[])
+
+    async def fake_parse(_url: str, _cookie: str | None) -> FakeResult:
+        return FakeResult()
+
+    async def fake_probe(_client: Any, _url: str) -> int:
+        return 10**9
+
+    monkeypatch.setattr(media, "parse_work", fake_parse)
+    monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
+
+    async with media.media_messages_for(
+        META,
+        "https://www.douyin.com/video/1",
+        cookie=None,
+        label="抖音",
+        temp_prefix="ifollow-test-",
+        max_bytes=1024,
+    ) as messages:
+        assert messages[0].extract_plain_text().startswith("呆呆丸 发布了新作品")
+
+    assert media_at_download == [None]
