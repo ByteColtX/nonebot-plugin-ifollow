@@ -23,7 +23,7 @@ from .platforms import (
 from .settings import Settings
 
 PROFILE_RE = re.compile(
-    r"(?:https?://)?(?:(?:www\.|m\.)?douyin\.com/user/"
+    r"(?:https?://)?(?:(?:www\.|m\.)?douyin\.com/(?:share/)?user/"
     r"|(?:www\.)?iesdouyin\.com/share/user/)"
     r"(?P<sec_user_id>[^/?#\s\"'<>]+)"
 )

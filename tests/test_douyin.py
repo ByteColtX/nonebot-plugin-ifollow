@@ -31,6 +31,14 @@ def test_extract_sec_user_id() -> None:
     assert douyin.extract_sec_user_id("https://www.douyin.com/video/123") is None
 
 
+def test_extract_sec_user_id_from_mobile_share_link() -> None:
+    """App 分享出来的是 m.douyin.com/share/user/<sec_uid>，要能认。"""
+
+    url = "https://m.douyin.com/share/user/MS4wLjABAAAA-mobile"
+    assert douyin.extract_sec_user_id(url) == "MS4wLjABAAAA-mobile"
+    assert douyin.matches(url)
+
+
 def response(
     status_code: int = 200, content: bytes = b"{}", data: Any = None
 ) -> httpx.Response:
