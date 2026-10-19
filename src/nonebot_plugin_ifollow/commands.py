@@ -26,6 +26,40 @@ LIST = on_command("爱播订阅列表", aliases={"爱播列表"}, priority=5, bl
 STATUS = on_command("爱播状态", priority=5, block=True)
 
 
+LINE_LIMIT = 12
+"""订阅列表超过这个行数就改用合并转发。"""
+
+
+def _needs_forward(text: str) -> bool:
+    """订阅列表的行数是否超过上限。"""
+
+    return len(text.rstrip("\n").splitlines()) > LINE_LIMIT
+
+
+async def _send_forward(bot: Bot, target: Any, text: str) -> bool:
+    """把整段列表发成一条合并转发；协议端不支持时返回 False。"""
+
+    private = bool(getattr(target, "private", False))
+    api = "send_private_forward_msg" if private else "send_group_forward_msg"
+    key = "user_id" if private else "group_id"
+    nickname = get_driver().config.nickname
+    name = next(iter(nickname), None) if nickname else None
+    node = {
+        "type": "node",
+        "data": {
+            "name": str(name or "爱播订阅"),
+            "uin": int(bot.self_id),
+            "content": [{"type": "text", "data": {"text": text}}],
+        },
+    }
+    try:
+        await bot.call_api(api, messages=[node], **{key: int(target.id)})
+    except Exception as exc:  # noqa: BLE001 - 转发不可用时退回文本
+        logger.debug(f"合并转发失败，改发文本：{exc}")
+        return False
+    return True
+
+
 @HELP.handle()
 async def help_command(event: Event, bot: Bot) -> None:
     """显示爱播命令帮助。"""
@@ -254,6 +288,8 @@ async def list_subscriptions(event: Event, bot: Bot) -> None:
     target = get_target(event, bot)
     authors = await context.store.snapshot()
     text = formatting.subscription_list(authors, make_target_key(target.dump()))
+    if _needs_forward(text) and await _send_forward(bot, target, text):
+        return
     await UniMessage(text).send(target=target, bot=bot)
 
 

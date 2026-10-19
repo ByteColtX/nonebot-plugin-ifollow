@@ -138,6 +138,86 @@ async def seed_subscription(
     return key
 
 
+class FakeForwardBot:
+    """记录合并转发调用；fail=True 时模拟协议端不支持。"""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.self_id = "3763502110"
+        self.fail = fail
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_api(self, api: str, **kwargs: Any) -> None:
+        if self.fail:
+            raise RuntimeError("api not supported")
+        self.calls.append((api, kwargs))
+
+
+async def seed_many(store: SubscriptionStore, target: Target, count: int) -> None:
+    key = make_target_key(target.dump())
+    for index in range(count):
+        await store.add_target(
+            "douyin",
+            f"sec{index}",
+            f"作者{index}",
+            key,
+            target.dump(),
+            {"video": Cursor("old", 1)},
+            subscriber_id="42",
+            author_handle="handle",
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_over_limit_uses_forward(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = env
+    target = Target.group("456654102")
+    monkeypatch.setattr(commands, "get_target", lambda _event, _bot: target)
+    await seed_many(store, target, 8)
+    bot = FakeForwardBot()
+
+    await commands.list_subscriptions(make_event(), bot)
+
+    assert FakeUniMessage.sent == []
+    api, kwargs = bot.calls[0]
+    assert api == "send_group_forward_msg"
+    assert kwargs["group_id"] == 456654102
+    assert kwargs["messages"][0]["data"]["content"][0]["data"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_list_at_limit_stays_plain(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = env
+    target = Target.group("456654102")
+    monkeypatch.setattr(commands, "get_target", lambda _event, _bot: target)
+    await seed_many(store, target, 7)
+    bot = FakeForwardBot()
+
+    await commands.list_subscriptions(make_event(), bot)
+
+    assert bot.calls == []
+    assert len(FakeUniMessage.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_forward_failure_falls_back(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = env
+    target = Target.group("456654102")
+    monkeypatch.setattr(commands, "get_target", lambda _event, _bot: target)
+    await seed_many(store, target, 8)
+    bot = FakeForwardBot(fail=True)
+
+    await commands.list_subscriptions(make_event(), bot)
+
+    assert len(FakeUniMessage.sent) == 1
+    assert FakeUniMessage.sent[0].startswith("爱播订阅（8 个）")
+
+
 def test_format_handle() -> None:
     from nonebot_plugin_ifollow.formatting import format_handle
 
