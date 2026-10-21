@@ -136,6 +136,9 @@ uv run ruff check . && uv run ruff format --check .
 uv run basedpyright
 ```
 
+发布流程见 [RELEASING.md](RELEASING.md)：先在 `CHANGELOG.md` 写版本段落并提交，再执行
+`uv run poe bump`，推送标签后由 CI 构建、发布 PyPI 并生成 GitHub Release。
+
 ### 代码结构
 
 ```

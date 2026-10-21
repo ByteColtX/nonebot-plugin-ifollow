@@ -57,6 +57,7 @@ current_version = "2.0.7"
 commit = true
 message = "chore(release): 将版本从 {current_version} 更新至 {new_version}"
 tag = true
+sign_tags = true
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
@@ -70,18 +71,19 @@ search = "name = \"nonebot-plugin-ifollow\"\nversion = \"{current_version}\""
 replace = "name = \"nonebot-plugin-ifollow\"\nversion = \"{new_version}\""
 
 [tool.pytest]
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "scripts"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 
 [tool.pyright]
 include = ["src", "tests"]
+extraPaths = ["scripts"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 
 [tool.ruff]
 line-length = 88
-src = ["src", "tests"]
+src = ["src", "tests", "scripts"]
 target-version = "py312"
 
 [tool.ruff.lint]

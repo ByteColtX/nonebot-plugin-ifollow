@@ -31,20 +31,23 @@ jobs:
       - name: Check Version
         if: steps.version.outputs.VERSION != steps.version.outputs.TAG_VERSION
         run: exit 1
+      - name: Extract Release Notes
+        run: |
+          uv run --no-project scripts/release_notes.py \
+            --version "${{ steps.version.outputs.VERSION }}" \
+            --output "$RUNNER_TEMP/release-notes.md"
       - name: Build and publish
         run: |
           uv build
-          uv publish
+          uv publish --check-url https://pypi.org/simple/
       - name: Ensure GitHub Release
         run: |
           TAG="${{ steps.version.outputs.TAG_NAME }}"
-          # Release Drafter 会为「下一个版本」预建草稿，标签正好撞上时草稿正文只有
-          # "No changes"；先删掉草稿再重建，才能拿到按提交生成的发布说明。
-          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
-            gh release delete "$TAG" --yes --cleanup-tag=false
-          fi
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
