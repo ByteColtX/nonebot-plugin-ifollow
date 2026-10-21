@@ -150,8 +150,8 @@ src/nonebot_plugin_ifollow/
 └── poller.py / delivery.py / failures.py / status.py
 ```
 
-主要模块旁有 `*.SPEC.md`（轮询子系统、存储、媒体、抖音 / B 站拉取与发送），记录边界、契约与
-决策；`AGENTS.md` 是给 coding agent 的约定。
+模块设计文档（轮询子系统、存储、媒体、抖音 / B 站拉取与发送）已归档到 `archive/specs`
+分支，不再随源码发布；`AGENTS.md` 是给 coding agent 的约定。
 
 ## 📄 许可
 
