@@ -81,8 +81,9 @@ git push origin main --follow-tags
 
 1. 校验 `project.version` 与标签版本一致；
 2. 从 `CHANGELOG.md` 提取发布说明，缺失则失败；
-3. `uv build`，用 PyPI Trusted Publishing 发布（`--check-url`，重跑不会因文件已存在而失败）；
-4. 创建或更新 GitHub Release（说明来自 CHANGELOG），上传 `dist/*.whl` 与 `dist/*.tar.gz`。
+3. 跑一遍 `uv run poe test`，避免标签指向未通过测试的提交；
+4. `uv build`，用 PyPI Trusted Publishing 发布（`--check-url`，重跑不会因文件已存在而失败）；
+5. 创建或更新 GitHub Release（说明来自 CHANGELOG），上传 `dist/*.whl` 与 `dist/*.tar.gz`。
 
 ## 预览发布说明
 
@@ -104,7 +105,8 @@ uv run --no-project scripts/release_notes.py --version 2.0.7
 
 | 现象 | 处理 |
 |---|---|
-| 标签推送后 CI 失败 | 修正后重跑 `Release` workflow；不要删除或移动已推送的标签 |
+| PyPI 发布前失败（测试、版本、CHANGELOG） | 修正后重跑；确实要改标签指向时，只能在 PyPI 发布前删除远端标签再重推 |
+| PyPI 发布后失败（GitHub Release、附件） | 直接重跑，`--check-url` 会跳过已上传文件；不要移动标签 |
 | 版本号与标签不一致 | 在发布前就会失败；删除本地标签，修正后重新 bump |
 | 需要撤回已发布版本 | PyPI 只能 yank，不能删除后复用版本号；发新的 patch 版本 |
 | 发布说明有误 | 改 `CHANGELOG.md` 对应段落，并编辑 GitHub Release；标签保持不动 |

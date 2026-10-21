@@ -1,6 +1,6 @@
-# release-skills 配置：仓库发布流程的约定。
-# 实际的版本提升与打标签由 bump-my-version 执行（见 pyproject.toml 的 [tool.bumpversion]），
-# 本文件让 release-skills 按同一套约定生成 CHANGELOG 与发布说明。
+# release-skills 配置：只约定生成 CHANGELOG 所需的信息。
+# 版本提升、提交与签名标签由 bump-my-version 执行（见 pyproject.toml 的 [tool.bumpversion]），
+# 不要让 release-skills 自己创建提交或标签，否则会和 bump-my-version 的约定分叉。
 
 version:
   file: pyproject.toml
@@ -24,15 +24,6 @@ changelog:
     style: 其他
     chore: null
 
-# bump-my-version 使用同一句模板（current_version / new_version 由它展开）。
-commit:
-  message: "chore(release): 将版本从 {current_version} 更新至 {new_version}"
-
+# 仅用于回填历史 Release 时归一化标签名。
 tag:
   prefix: v
-  sign: true
-
-include:
-  - pyproject.toml
-  - uv.lock
-  - CHANGELOG.md
