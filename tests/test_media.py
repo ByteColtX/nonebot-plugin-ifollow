@@ -78,6 +78,30 @@ def test_caption_omits_empty_detail_line() -> None:
     assert text == f"作者 发布了新作品\n{media.SEPARATOR}"
 
 
+def test_caption_reports_skipped_media_before_timestamp() -> None:
+    result = SimpleNamespace(title="标题", content="")
+    bundle = media.MediaBundle(
+        count=1,
+        total_bytes=2048,
+        skipped=2,
+        max_bytes=100 * 1024 * 1024,
+    )
+
+    lines = media.caption(META, result, bundle).splitlines()
+
+    assert lines[-2] == "另有 2 个媒体超过 100MB 未发送"
+    assert lines[-1] == stamp()
+
+
+def test_caption_reports_skipped_media_without_detail_line() -> None:
+    result = SimpleNamespace(title="", content="")
+    bundle = media.MediaBundle(skipped=1, max_bytes=100 * 1024 * 1024)
+
+    lines = media.caption(media.WorkMeta("作者", 0), result, bundle).splitlines()
+
+    assert lines[-1] == "另有 1 个媒体超过 100MB 未发送"
+
+
 async def test_media_messages_sends_single_video(tmp_path: Path) -> None:
     video = write(tmp_path / "work", size=1049051, suffix=".mp4")
 
@@ -139,6 +163,8 @@ async def test_media_messages_skips_oversized_file(tmp_path: Path) -> None:
 
     assert bundle.messages == []
     assert bundle.count == 0
+    assert bundle.skipped == 1
+    assert bundle.max_bytes == 8
 
 
 async def test_media_messages_skips_missing_file(tmp_path: Path) -> None:
@@ -238,9 +264,10 @@ async def test_oversized_video_is_dropped_before_download(
     monkeypatch.setattr(media, "_probe_remote_size", fake_probe)
     result = SimpleNamespace(media=[FakeRef("https://cdn/video.mp4")])
 
-    await media._drop_oversized_media(result, policy(1024), "抖音")
+    dropped = await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media is None
+    assert dropped == 1
 
 
 async def test_unknown_size_keeps_media_for_post_download_check(
@@ -255,9 +282,10 @@ async def test_unknown_size_keeps_media_for_post_download_check(
     ref = FakeRef("https://cdn/video.mp4")
     result = SimpleNamespace(media=[ref])
 
-    await media._drop_oversized_media(result, policy(1024), "抖音")
+    dropped = await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media == [ref]
+    assert dropped == 0
 
 
 async def test_images_are_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -308,9 +336,10 @@ async def test_mixed_album_keeps_media_within_limit(
     small = FakeRef("https://cdn/c.mp4")
     result = SimpleNamespace(media=[image, big, small])
 
-    await media._drop_oversized_media(result, policy(1024), "抖音")
+    dropped = await media._drop_oversized_media(result, policy(1024), "抖音")
 
     assert result.media == [image, small]
+    assert dropped == 1
 
 
 async def test_media_messages_for_skips_download_when_everything_is_too_big(
@@ -344,12 +373,14 @@ async def test_media_messages_for_skips_download_when_everything_is_too_big(
     async with media.media_messages_for(
         META,
         "https://www.douyin.com/video/1",
-        policy=policy(1024),
+        policy=policy(1024 * 1024),
         cookie=None,
         label="抖音",
         temp_prefix="ifollow-test-",
     ) as messages:
-        assert messages[0].extract_plain_text().startswith("抖音 · 呆呆丸 发布了新作品")
+        text = messages[0].extract_plain_text()
+        assert text.startswith("抖音 · 呆呆丸 发布了新作品")
+        assert "另有 1 个媒体超过 1MB 未发送" in text
 
     assert media_at_download == [None]
 

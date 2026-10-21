@@ -69,7 +69,8 @@ plugins = ["nonebot_plugin_ifollow"]
   （15 秒 ~ 5 分钟），抓取并发 4。默认 30 分钟按「多数作者月更」定，34 个作者约 1600 次请求/天。
 - **补发上限**：不是页大小。停机很久后回来最多补发最新 5 条，更早的跳过（日志里有 warning）。
 - **媒体传输**：默认把本地路径（`file://`）交给协议端，插件不读字节也不编码；协议端在另一台机器、
-  读不到同一路径时才开 `IFOLLOW_USE_BASE64`。
+  读不到同一路径时才开 `IFOLLOW_USE_BASE64`。单个媒体超过 `IFOLLOW_MEDIA_MAX_MB` 时跳过该媒体，
+  并在文案里注明「另有 N 个媒体超过 XMB 未发送」。
 - **旧配置**：`IFOLLOW_SUBSCRIBE_INTERVAL` / `IFOLLOW_SUBSCRIBE_COUNT` 已废弃且不再读取，请改成新名字。
 - **数据格式**：订阅数据为 v3，不兼容旧版本；升级需清空插件数据目录里的 `subscriptions.json` 并重新订阅。
 

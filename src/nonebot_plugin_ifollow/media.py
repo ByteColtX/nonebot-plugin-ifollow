@@ -99,6 +99,10 @@ class MediaBundle:
     width: int = 0
     height: int = 0
     video_seconds: int = 0
+    skipped: int = 0
+    """因超过体积上限而未发送的媒体数量，不含文件缺失。"""
+    max_bytes: int = 0
+    """体积上限，用于在文案里说明跳过原因。"""
 
 
 def _import_parsehub() -> Any:
@@ -229,6 +233,11 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
     details = _detail_parts(bundle)
     if details:
         lines.append(" · ".join(details))
+    if bundle.skipped:
+        lines.append(
+            f"另有 {bundle.skipped} 个媒体超过 "
+            f"{bundle.max_bytes // 1024 // 1024}MB 未发送"
+        )
     if meta.create_time:
         stamp = datetime.fromtimestamp(meta.create_time).strftime("%Y-%m-%d %H:%M")
         lines.append(stamp)
@@ -331,7 +340,7 @@ async def _keep_by_size(
     return True
 
 
-async def _drop_oversized_media(result: Any, policy: MediaPolicy, label: str) -> None:
+async def _drop_oversized_media(result: Any, policy: MediaPolicy, label: str) -> int:
     """下载前剔除超限的视频类媒体，避免白下载。
 
     只探测视频、动图与实况照片；探测失败或拿不到长度时保留该媒体，由下载后的体积
@@ -341,28 +350,32 @@ async def _drop_oversized_media(result: Any, policy: MediaPolicy, label: str) ->
         result: parsehub 的解析结果，会就地修改它的 ``media``。
         policy: 媒体处理策略。
         label: 日志里使用的平台名。
+
+    Returns:
+        被剔除的媒体数量。
     """
 
     raw_media = getattr(result, "media", None)
     if raw_media is None:
-        return
+        return 0
     is_sequence = isinstance(raw_media, Sequence)
     refs = list(raw_media) if is_sequence else [raw_media]
     targets = [ref for ref in refs if _needs_size_probe(ref)]
     if not targets:
-        return
+        return 0
     async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
         keep = await asyncio.gather(
             *(_keep_by_size(client, ref, policy.max_bytes, label) for ref in targets)
         )
     dropped = {id(ref) for ref, kept in zip(targets, keep) if not kept}
     if not dropped:
-        return
+        return 0
     kept_refs = [ref for ref in refs if id(ref) not in dropped]
     if is_sequence:
         result.media = kept_refs or None
     else:
         result.media = kept_refs[0] if kept_refs else None
+    return len(dropped)
 
 
 async def _segments_for(path: Path, *, base64_media: bool) -> UniMessage:
@@ -394,6 +407,7 @@ async def media_messages(
     policy: MediaPolicy,
     label: str,
     duration_unit: Literal["ms", "s"] = "s",
+    skipped: int = 0,
 ) -> MediaBundle:
     """把下载好的媒体拼成若干条消息：图片按批合并，视频单独发送。
 
@@ -402,13 +416,14 @@ async def media_messages(
         policy: 媒体处理策略（体积上限、数量上限、图片批次、传输方式）。
         label: 日志里使用的平台名。
         duration_unit: parsehub 返回的时长单位。
+        skipped: 下载前已因体积超限剔除的媒体数量。
 
     Returns:
         媒体消息与文案统计。
     """
 
     images: list[Path] = []
-    bundle = MediaBundle()
+    bundle = MediaBundle(skipped=skipped, max_bytes=policy.max_bytes)
     selected = files[: policy.max_count]
     paths = [Path(str(getattr(file, "path", ""))) for file in selected]
     live_paths = [
@@ -437,6 +452,7 @@ async def media_messages(
                 f"{label}媒体 {path.name} 超过 "
                 f"{policy.max_bytes // 1024 // 1024}MB，已跳过"
             )
+            bundle.skipped += 1
             continue
 
         bundle.count += 1
@@ -456,13 +472,14 @@ async def media_messages(
                 getattr(file, "duration", 0), duration_unit
             )
             live_size = sizes.get(live_path)
-            if live_size is not None and (
-                not policy.max_bytes or live_size <= policy.max_bytes
-            ):
-                bundle.messages.append(
-                    await _segments_for(live_path, base64_media=policy.base64_media)
-                )
-                bundle.total_bytes += live_size
+            if live_size is not None:
+                if not policy.max_bytes or live_size <= policy.max_bytes:
+                    bundle.messages.append(
+                        await _segments_for(live_path, base64_media=policy.base64_media)
+                    )
+                    bundle.total_bytes += live_size
+                else:
+                    bundle.skipped += 1
             continue
 
         if path.suffix.lower() in VIDEO_SUFFIXES:
@@ -487,6 +504,7 @@ async def build_messages(
     *,
     label: str,
     policy: MediaPolicy,
+    skipped: int = 0,
 ) -> list[UniMessage]:
     """把解析结果与下载结果拼成待发送的消息列表。
 
@@ -496,13 +514,14 @@ async def build_messages(
         meta: 作者与发布时间。
         label: 日志里使用的平台名。
         policy: 媒体处理策略。
+        skipped: 下载前已因体积超限剔除的媒体数量。
 
     Returns:
         第一条是文案，其后是媒体消息。
     """
 
     bundle = await media_messages(
-        downloaded_files(download), policy, label, meta.duration_unit
+        downloaded_files(download), policy, label, meta.duration_unit, skipped
     )
     return [UniMessage(caption(meta, result, bundle)), *bundle.messages]
 
@@ -536,9 +555,12 @@ async def media_messages_for(
     workdir = Path(tempfile.mkdtemp(prefix=temp_prefix))
     try:
         result = await parse_work(url, cookie)
+        skipped = 0
         if policy.max_bytes:
-            await _drop_oversized_media(result, policy, label)
+            skipped = await _drop_oversized_media(result, policy, label)
         download = await result.download(workdir)
-        yield await build_messages(result, download, meta, label=label, policy=policy)
+        yield await build_messages(
+            result, download, meta, label=label, policy=policy, skipped=skipped
+        )
     finally:
         await asyncio.to_thread(shutil.rmtree, workdir, ignore_errors=True)
