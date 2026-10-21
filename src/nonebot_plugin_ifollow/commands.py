@@ -54,7 +54,7 @@ async def _send_forward(bot: Bot, target: Any, text: str) -> bool:
     }
     try:
         await bot.call_api(api, messages=[node], **{key: int(target.id)})
-    except Exception as exc:  # noqa: BLE001 - 转发不可用时退回文本
+    except Exception as exc:  # 转发不可用时退回文本
         logger.debug(f"合并转发失败，改发文本：{exc}")
         return False
     return True
