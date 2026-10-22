@@ -24,18 +24,18 @@ from .style import (
 
 
 def help_message() -> str:
-    """生成帮助正文；命令名和前缀都取自同一份定义。"""
+    """生成帮助正文；正文里只写命令名，不带前缀。"""
 
     return (
-        f"{command_text(HELP_COMMAND)}\n"
+        f"{HELP_COMMAND}\n"
         f"{SEPARATOR}\n"
-        f"· {command_text(SUBSCRIBE_COMMAND, '<作者主页、作品链接或作者 ID>')}\n"
-        f"· {command_text(LIST_COMMAND)}\n"
-        f"· {command_text(UNSUBSCRIBE_COMMAND, '<序号、作者 ID、昵称或链接>')}\n"
+        f"· {SUBSCRIBE_COMMAND} <作者主页、作品链接或作者 ID>\n"
+        f"· {LIST_COMMAND}\n"
+        f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接>\n"
         "  （只能退自己的；群管理、群主和机器人管理员可退本群任何订阅）\n"
-        f"· {command_text(STATUS_COMMAND)}（仅超级用户）\n"
+        f"· {STATUS_COMMAND}（仅超级用户）\n"
         f"{SEPARATOR}\n"
-        f"引用含链接的消息后发送 {command_text(SUBSCRIBE_COMMAND)} 也能订阅。\n"
+        f"引用含链接的消息后发送 {SUBSCRIBE_COMMAND} 也能订阅。\n"
         "支持抖音与 B 站，首次订阅不补发历史内容。"
     )
 
