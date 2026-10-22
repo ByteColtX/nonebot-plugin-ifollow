@@ -166,7 +166,6 @@ class Poller:
         else:
             state.failure_count = 0
             state.last_error = ""
-            state.last_success_at = time.monotonic()
             state.next_poll_at = time.monotonic() + self.settings.interval
         finally:
             self.in_flight.discard(author.key)

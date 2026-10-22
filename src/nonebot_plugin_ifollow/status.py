@@ -20,7 +20,6 @@ class AuthorPollState:
 
     next_poll_at: float = 0.0
     failure_count: int = 0
-    last_success_at: float = 0.0
     last_error: str = ""
     disabled: bool = False
 
