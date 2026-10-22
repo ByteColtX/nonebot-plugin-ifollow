@@ -67,8 +67,13 @@ def make_work(work_id: str = "w1", timestamp: int = 100) -> PlatformWork:
 class FakeAdapter:
     platform = "douyin"
 
-    def __init__(self, works: list[PlatformWork] | None = None) -> None:
+    def __init__(
+        self,
+        works: list[PlatformWork] | None = None,
+        author: AuthorInfo | None = None,
+    ) -> None:
         self.works = works if works is not None else [make_work()]
+        self.author = author or AuthorInfo("sec", "作者", "handle")
         self.resolve_calls = 0
 
     def matches(self, _value: str) -> bool:
@@ -79,8 +84,7 @@ class FakeAdapter:
 
     async def resolve(self, _settings: Settings, _value: str) -> ResolvedAuthor:
         self.resolve_calls += 1
-        author = AuthorInfo("sec", "作者", "handle")
-        return ResolvedAuthor(author, {"video": self.works})
+        return ResolvedAuthor(self.author, {"video": self.works})
 
     async def fetch(
         self, _settings: Settings, _author_id: str, _feed: str, _cursor: Any = None
@@ -289,6 +293,24 @@ async def test_subscribe_duplicate_reports_noop(
     await commands.subscribe(make_event(), Mock(), args("sec"))
 
     assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 作者，无需重复。"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_duplicate_refreshes_metadata(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = env
+    await seed_subscription(store)
+    adapter = FakeAdapter(author=AuthorInfo("sec", "新名字", "新抖音号"))
+    monkeypatch.setattr(commands, "detect", lambda _value: adapter)
+
+    await commands.subscribe(make_event(), Mock(), args("sec"))
+
+    snapshot = await store.snapshot()
+    author = snapshot["douyin:sec"]
+    assert author.author_name == "新名字"
+    assert author.author_handle == "新抖音号"
+    assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 新名字，无需重复。"
 
 
 @pytest.mark.asyncio

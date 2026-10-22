@@ -112,10 +112,19 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     existing = authors.get(author_key)
     if existing and target_key in existing.targets:
         async with context.store.transaction():
+            await context.store.update_author_metadata(
+                adapter.platform,
+                author.author_id,
+                author.name,
+                author.handle,
+                existing.last_update_time,
+            )
             joined = await context.store.add_subscriber(
                 adapter.platform, author.author_id, target_key, subscriber_id
             )
-        label = formatting.author_label(adapter.platform, existing.author_name)
+        label = formatting.author_label(
+            adapter.platform, author.name or existing.author_name
+        )
         if joined:
             await UniMessage(f"已为 {label} 开启更新提醒。").send(
                 target=target, bot=bot
