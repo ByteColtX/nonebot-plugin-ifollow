@@ -13,7 +13,7 @@ import time
 from nonebot import logger
 
 from .adapters import adapter_for
-from .delivery import DeliveryContext, deliver_author, prune
+from .delivery import DeliveryContext, deliver_author, prune, scan_dead_targets
 from .errors import PermanentError, TransientError
 from .failures import backoff_seconds, short_reason
 from .models import AuthorSubscription, SubscriptionStore
@@ -93,12 +93,15 @@ class Poller:
         started = time.monotonic()
         authors = await self.store.snapshot()
         self._prune(authors)
+        if authors:
+            await self._scan_targets(authors)
         now = time.monotonic()
         due = [
             author
             for author in authors.values()
             if not self.state(author.key).disabled
             and self.state(author.key).next_poll_at <= now
+            and self._has_live_targets(author)
         ]
         if not due:
             return
@@ -124,6 +127,24 @@ class Poller:
             f"爱播轮询完成：{self.stats.due}/{self.stats.authors} 个作者到期，"
             f"耗时 {self.stats.duration:.1f} 秒，{self.stats.new_works} 个新作品，"
             f"发送 {self.stats.delivered} 次，放弃 {self.stats.abandoned} 个"
+        )
+
+    async def _scan_targets(self, authors: dict[str, AuthorSubscription]) -> None:
+        """首次拿到机器人后扫描一次群与好友列表，之后不再调用。"""
+
+        if self.context.scanned:
+            return
+        dead = await scan_dead_targets(authors)
+        if dead is None:
+            return
+        self.context.dead_targets = dead
+        self.context.scanned = True
+
+    def _has_live_targets(self, author: AuthorSubscription) -> bool:
+        """作者是否还有至少一个可达目标。"""
+
+        return any(
+            target_key not in self.context.dead_targets for target_key in author.targets
         )
 
     async def poll_author(self, author: AuthorSubscription) -> None:

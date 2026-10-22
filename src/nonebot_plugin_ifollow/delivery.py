@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections import deque
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from typing import Any
 
-from nonebot import logger
+from nonebot import get_bots, logger
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target
 
@@ -43,6 +44,8 @@ class DeliveryContext:
         default_factory=lambda: deque(maxlen=5)
     )
     sent: dict[tuple[str, str], deque[str]] = field(default_factory=dict)
+    dead_targets: set[str] = field(default_factory=set)
+    scanned: bool = False
 
 
 def attempt_key(
@@ -74,6 +77,49 @@ def sent_identities(
     """
 
     return ctx.sent.setdefault((author_key, target_key), deque(maxlen=SENT_MEMORY))
+
+
+def target_is_dead(target: dict[str, Any], groups: set[str], friends: set[str]) -> bool:
+    """判断一个目标是否已不可达：退群，或私聊不是好友。"""
+
+    if target.get("channel"):
+        return False
+    target_id = str(target.get("id") or "")
+    if target.get("private"):
+        return target_id not in friends
+    return target_id not in groups
+
+
+async def scan_dead_targets(
+    authors: dict[str, AuthorSubscription],
+) -> set[str] | None:
+    """扫描一次群与好友列表，返回不可达目标的键。
+
+    没有机器人或接口失败时返回 ``None``，调用方据此放弃本次过滤。
+    """
+
+    bots = get_bots()
+    if not bots:
+        return None
+    groups: set[str] = set()
+    friends: set[str] = set()
+    try:
+        for bot in bots.values():
+            groups.update(
+                str(group["group_id"]) for group in await bot.get_group_list()
+            )
+            friends.update(
+                str(friend["user_id"]) for friend in await bot.get_friend_list()
+            )
+    except Exception as exc:
+        logger.debug(f"读取群或好友列表失败，稍后重试：{exc}")
+        return None
+    return {
+        target_key
+        for author in authors.values()
+        for target_key, state in author.targets.items()
+        if target_is_dead(state.target, groups, friends)
+    }
 
 
 async def deliver_author(
@@ -175,6 +221,12 @@ async def deliver_work(
         sendable.append(target_key)
     if not sendable:
         return
+    if ctx.dead_targets:
+        sendable = [
+            target_key for target_key in sendable if target_key not in ctx.dead_targets
+        ]
+        if not sendable:
+            return
     try:
         async with media_for(work, ctx.settings) as messages:
             for target_key in sendable:
@@ -334,6 +386,8 @@ __all__ = [
     "handle_target_failure",
     "media_for",
     "prune",
+    "scan_dead_targets",
     "send_work",
     "sent_identities",
+    "target_is_dead",
 ]

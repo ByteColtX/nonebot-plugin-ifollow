@@ -301,6 +301,95 @@ async def test_kicked_group_only_skips_that_target(
     assert first in poller.context.permanent_targets
 
 
+class FakeBot:
+    """只实现群列表与好友列表的机器人替身。"""
+
+    def __init__(
+        self,
+        groups: set[str],
+        friends: set[str],
+        error: Exception | None = None,
+    ) -> None:
+        self.groups = groups
+        self.friends = friends
+        self.error = error
+        self.calls = 0
+
+    async def get_group_list(self) -> list[dict[str, str]]:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return [{"group_id": group} for group in self.groups]
+
+    async def get_friend_list(self) -> list[dict[str, str]]:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return [{"user_id": friend} for friend in self.friends]
+
+
+@pytest.mark.asyncio
+async def test_round_skips_dead_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: FakeAdapter
+) -> None:
+    """退群和私聊非好友都跳过，且只扫描一次。"""
+
+    store = SubscriptionStore(tmp_path)
+    targets = {
+        "alive": Target.group("alive"),
+        "gone": Target.group("gone"),
+        "private": Target.user("42"),
+    }
+    for target in targets.values():
+        await store.add_target(
+            "bilibili",
+            "123",
+            "作者",
+            make_target_key(target.dump()),
+            target.dump(),
+            {"video": Cursor("old", 1)},
+        )
+    adapter.works = [make_work("new", 2)]
+    sent: list[str] = []
+    patch_media(monkeypatch, sent)
+    bot = FakeBot({"alive"}, set())
+    monkeypatch.setattr(delivery, "get_bots", lambda: {"1": bot})
+    poller = Poller(store, SETTINGS)
+
+    await poller.run_round()
+    await poller.run_round()
+
+    assert sent == ["new"]
+    snapshot = await store.snapshot()
+    for name in ("gone", "private"):
+        key = make_target_key(targets[name].dump())
+        assert cursor_of(snapshot, key) == Cursor("old", 1)
+    alive_key = make_target_key(targets["alive"].dump())
+    assert cursor_of(snapshot, alive_key) == Cursor("new", 2)
+    assert bot.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_scan_failure_keeps_all_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: FakeAdapter
+) -> None:
+    """扫描失败时不做过滤，下一轮继续尝试。"""
+
+    store, _author, (target_key,) = await make_author(tmp_path, "group")
+    adapter.works = [make_work("new", 2)]
+    sent: list[str] = []
+    patch_media(monkeypatch, sent)
+    bot = FakeBot(set(), set(), RuntimeError("api failed"))
+    monkeypatch.setattr(delivery, "get_bots", lambda: {"1": bot})
+    poller = Poller(store, SETTINGS)
+
+    await poller.run_round()
+
+    assert sent == ["new"]
+    assert cursor_of(await store.snapshot(), target_key) == Cursor("new", 2)
+    assert not poller.context.scanned
+
+
 @pytest.mark.asyncio
 async def test_dynamic_sharing_bvid_is_deduplicated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
