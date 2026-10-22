@@ -11,7 +11,7 @@ from typing import Protocol
 from .failures import WORK_RETRY_LIMIT
 from .models import AuthorSubscription
 from .settings import Settings
-from .style import SEPARATOR, platform_name
+from .style import SEPARATOR, STATUS_COMMAND, platform_name
 
 
 @dataclass
@@ -84,7 +84,7 @@ def render(
 
     now = time.monotonic()
     lines = [
-        "爱播状态",
+        STATUS_COMMAND,
         SEPARATOR,
         f"· 调度：每 {int(tick_seconds)} 秒扫描，作者周期 {settings.interval} 秒，"
         f"抓取并发 {fetch_concurrency}",

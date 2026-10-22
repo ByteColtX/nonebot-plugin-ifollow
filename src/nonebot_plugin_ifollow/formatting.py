@@ -12,20 +12,56 @@ from .errors import PermanentError, TransientError
 from .models import AuthorSubscription
 from .platforms import Platform
 from .status import platform_name
-from .style import SEPARATOR
-
-HELP_MESSAGE = (
-    "爱播帮助\n"
-    f"{SEPARATOR}\n"
-    "· 爱播订阅 <作者主页或作品链接>\n"
-    "· 爱播订阅列表\n"
-    "· 爱播取消订阅 <序号、作者 ID 或链接>\n"
-    "  （只能取消自己的；群管理、群主和机器人管理员可取消本群任何订阅）\n"
-    "· 爱播状态（仅超级用户）\n"
-    f"{SEPARATOR}\n"
-    "引用含链接的消息后发送 爱播订阅 也能订阅。\n"
-    "支持抖音与 B 站，首次订阅不补发历史内容。"
+from .style import (
+    HELP_COMMAND,
+    LIST_COMMAND,
+    SEPARATOR,
+    STATUS_COMMAND,
+    SUBSCRIBE_COMMAND,
+    UNSUBSCRIBE_COMMAND,
+    command_text,
 )
+
+
+def help_message() -> str:
+    """生成帮助正文；命令名和前缀都取自同一份定义。"""
+
+    return (
+        f"{command_text(HELP_COMMAND)}\n"
+        f"{SEPARATOR}\n"
+        f"· {command_text(SUBSCRIBE_COMMAND, '<作者主页、作品链接或作者 ID>')}\n"
+        f"· {command_text(LIST_COMMAND)}\n"
+        f"· {command_text(UNSUBSCRIBE_COMMAND, '<序号、作者 ID、昵称或链接>')}\n"
+        "  （只能退自己的；群管理、群主和机器人管理员可退本群任何订阅）\n"
+        f"· {command_text(STATUS_COMMAND)}（仅超级用户）\n"
+        f"{SEPARATOR}\n"
+        f"引用含链接的消息后发送 {command_text(SUBSCRIBE_COMMAND)} 也能订阅。\n"
+        "支持抖音与 B 站，首次订阅不补发历史内容。"
+    )
+
+
+def usage() -> str:
+    """生成插件元数据里的简短用法。"""
+
+    return "\n".join(
+        (
+            command_text(HELP_COMMAND),
+            command_text(SUBSCRIBE_COMMAND, "<作者主页或作品链接>"),
+            command_text(LIST_COMMAND),
+            command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>"),
+            f"{command_text(STATUS_COMMAND)}（超级用户）",
+        )
+    )
+
+
+def empty_subscription_message() -> str:
+    """当前会话没有订阅时的统一提示。"""
+
+    return (
+        "当前会话没有爱播订阅。\n"
+        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页链接>')} 开始订阅。"
+    )
+
 
 _PLATFORM_CODES = {"douyin": "DY", "bilibili": "BILI"}
 
@@ -109,7 +145,7 @@ def target_subscriptions(
 ) -> list[AuthorSubscription]:
     """返回当前会话的订阅，按平台分组、组内保持订阅先后。
 
-    列表展示与「按序号取消」共用这一个顺序，改排序时两者不会错位。
+    列表展示与「按序号退订」共用这一个顺序，改排序时两者不会错位。
     """
 
     items = [author for author in authors.values() if target_key in author.targets]
@@ -157,12 +193,12 @@ def subscription_list(
     *,
     now: float | None = None,
 ) -> str:
-    """生成 ``爱播订阅列表`` 的正文：按平台分组，末尾给出取消订阅提示。"""
+    """生成 ``爱播列表`` 的正文：按平台分组，末尾给出退订提示。"""
 
     items = target_subscriptions(authors, target_key)
     if not items:
-        return "当前会话没有爱播订阅。\n发送 爱播订阅 <作者主页链接> 开始订阅。"
-    lines = [f"爱播订阅（{len(items)} 个）", SEPARATOR]
+        return empty_subscription_message()
+    lines = [f"{LIST_COMMAND}（{len(items)} 个）", SEPARATOR]
     current_platform: str | None = None
     for index, author in enumerate(items, 1):
         if author.platform != current_platform:
@@ -171,7 +207,7 @@ def subscription_list(
             current_platform = author.platform
             lines.append(platform_name(author.platform))
         lines.append(f"{index}. {_describe(author, now=now)}")
-    lines.extend(["", "取消订阅：爱播取消订阅 <序号>"])
+    lines.extend(["", f"退订：{command_text(UNSUBSCRIBE_COMMAND, '<序号>')}"])
     return "\n".join(lines)
 
 
@@ -186,14 +222,16 @@ def _describe(author: AuthorSubscription, *, now: float | None) -> str:
 
 
 __all__ = [
-    "HELP_MESSAGE",
     "PLATFORM_ORDER",
     "FailureReport",
     "author_label",
     "describe_failure",
+    "empty_subscription_message",
     "format_handle",
     "format_relative_time",
+    "help_message",
     "render_failure",
     "subscription_list",
     "target_subscriptions",
+    "usage",
 ]
