@@ -39,6 +39,23 @@ def test_extract_sec_user_id_from_mobile_share_link() -> None:
     assert douyin.matches(url)
 
 
+def test_matches_note_and_slides_links() -> None:
+    """图文（note）与图集（slides）链接也要能被识别为抖音作品。"""
+
+    urls = [
+        "https://www.iesdouyin.com/share/note/7412345678901234567?schema_type=37",
+        "https://www.iesdouyin.com/share/slides/7412345678901234567",
+        "https://www.douyin.com/note/7412345678901234567",
+        "https://www.douyin.com/share/note/7412345678901234567",
+        "https://m.douyin.com/share/slides/7412345678901234567",
+    ]
+    for url in urls:
+        assert douyin.matches(url), url
+        match = douyin.WORK_RE.search(url)
+        assert match is not None, url
+        assert match["aweme_id"] == "7412345678901234567"
+
+
 def response(
     status_code: int = 200, content: bytes = b"{}", data: Any = None
 ) -> httpx.Response:
@@ -566,6 +583,51 @@ async def test_resolve_sec_user_id_reads_author_from_detail(client: Any) -> None
     assert (
         await douyin.resolve_sec_user_id(SETTINGS, "https://www.douyin.com/video/123")
         == "MS4wLjABAAAA-x"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_sec_user_id_follows_note_short_link(client: Any) -> None:
+    """App 分享的图文短链会展开成 iesdouyin.com/share/note/<id>，不能再报网络错误。"""
+
+    note_url = "https://www.iesdouyin.com/share/note/7412345678901234567?schema_type=37"
+
+    def route(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "v.douyin.com":
+            return httpx.Response(302, headers={"location": note_url})
+        if request.url.path == "/aweme/v1/web/aweme/detail/":
+            return response(
+                data={"aweme_detail": {"author": {"sec_uid": "MS4wLjABAAAA-note"}}}
+            )
+        return response(content=b"")
+
+    created = client(Stub(route))
+
+    assert (
+        await douyin.resolve_sec_user_id(SETTINGS, "https://v.douyin.com/abc/")
+        == "MS4wLjABAAAA-note"
+    )
+    assert created.requests[-1].url.params["aweme_id"] == "7412345678901234567"
+
+
+@pytest.mark.asyncio
+async def test_resolve_sec_user_id_accepts_direct_note_link(client: Any) -> None:
+    """直接粘贴 douyin.com/note/<id> 也要能解析出作者。"""
+
+    def route(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/aweme/v1/web/aweme/detail/":
+            return response(
+                data={"aweme_detail": {"author": {"sec_uid": "MS4wLjABAAAA-note"}}}
+            )
+        return response(content=b"")
+
+    client(Stub(route))
+
+    assert (
+        await douyin.resolve_sec_user_id(
+            SETTINGS, "https://www.douyin.com/note/7412345678901234567"
+        )
+        == "MS4wLjABAAAA-note"
     )
 
 

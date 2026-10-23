@@ -29,7 +29,11 @@ PROFILE_RE = re.compile(
 )
 SEC_USER_ID_RE = re.compile(r"^MS4w[^\s/?#]+$")
 SHORT_LINK_RE = re.compile(r"https?://(?:v|jx)\.douyin\.com/[\w-]+")
-WORK_RE = re.compile(r"(?:https?://)?(?:www\.|m\.)?douyin\.com/video/(?P<aweme_id>\d+)")
+WORK_RE = re.compile(
+    r"(?:https?://)?(?:www\.|m\.)?"
+    r"(?:douyin\.com/(?:share/)?|iesdouyin\.com/share/)"
+    r"(?:video|note|slides)/(?P<aweme_id>\d+)"
+)
 WORK_DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 AUTHOR_PROFILE_URL = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
 AUTHOR_POST_URL = "https://www.douyin.com/aweme/v1/web/aweme/post/"
