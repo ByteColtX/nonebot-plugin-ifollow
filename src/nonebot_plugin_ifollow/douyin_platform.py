@@ -11,7 +11,7 @@ import httpx
 from nonebot import logger
 
 from .douyin_abogus import generate_abogus
-from .errors import PermanentError, TransientError
+from .errors import IfollowError, PermanentError, TransientError
 from .pagination import Page, paginate
 from .platforms import (
     AuthorInfo,
@@ -45,6 +45,18 @@ BLOCKED_STATUS_CODES = frozenset({403, 429, 444, 500, 502, 503, 504})
 
 INVALID_AUTHOR_STATUS = 5
 """作品列表接口表示作者不存在或已注销的 status_code。"""
+
+AID_MOBILE = "1128"
+"""移动端客户端号：作品列表实时，但不返回图文（``aweme_type=68``）。"""
+
+AID_WEB = "6383"
+"""PC web 客户端号：能返回图文，但作品列表可能滞后数天。"""
+
+POST_AIDS = (AID_MOBILE, AID_WEB)
+"""作品列表要同时查询的客户端号；合并后兼顾实时性与图文完整性。"""
+
+NOTE_AWEME_TYPE = 68
+"""图文作品的 ``aweme_type``。"""
 
 platform = "douyin"
 
@@ -200,27 +212,63 @@ async def fetch(
         return []
     async with _client(settings, timeout=30) as client:
 
-        async def fetch_page(token: str | None) -> Page:
-            data = await _fetch_post_page(settings, client, author_id, token or "0")
-            raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
-            if not isinstance(raw_works, list):
-                raise TransientError("抖音接口缺少 aweme_list")
-            works = [
-                work
-                for raw in raw_works
-                if (work := _parse_work_item(raw, author_id)) is not None
-            ]
-            next_cursor = str(data.get("max_cursor") or "")
-            has_more = bool(
-                data.get("has_more") and next_cursor and next_cursor != (token or "0")
-            )
-            return Page(
-                works=works,
-                next_token=next_cursor or None,
-                has_more=has_more,
-            )
+        async def fetch_stream(aid: str) -> list[PlatformWork]:
+            async def fetch_page(token: str | None) -> Page:
+                data = await _fetch_post_page(
+                    settings, client, author_id, token or "0", aid
+                )
+                raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
+                if not isinstance(raw_works, list):
+                    raise TransientError("抖音接口缺少 aweme_list")
+                works = [
+                    work
+                    for raw in raw_works
+                    if (work := _parse_work_item(raw, author_id)) is not None
+                ]
+                next_cursor = str(data.get("max_cursor") or "")
+                has_more = bool(
+                    data.get("has_more")
+                    and next_cursor
+                    and next_cursor != (token or "0")
+                )
+                return Page(
+                    works=works,
+                    next_token=next_cursor or None,
+                    has_more=has_more,
+                )
 
-        works = await paginate(fetch_page, cursor=cursor, limit=settings.max_items)
+            return await paginate(fetch_page, cursor=cursor, limit=settings.max_items)
+
+        results = await asyncio.gather(
+            *(fetch_stream(aid) for aid in POST_AIDS),
+            return_exceptions=True,
+        )
+
+    works_by_id: dict[str, PlatformWork] = {}
+    errors: list[IfollowError] = []
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, IfollowError):
+            errors.append(result)
+            continue
+        if isinstance(result, BaseException):
+            raise result
+        for work in result:
+            works_by_id.setdefault(work.work_id, work)
+
+    if errors and not works_by_id:
+        # 两条流都失败，或唯一有结果的那条是空列表：不能让空结果掩盖故障，
+        # 否则图文作者会一直「没有新作品」。
+        raise errors[0]
+    if errors:
+        logger.warning(
+            f"抖音作者 {author_id} 有一条作品列表接口失败，已使用其余结果：{errors[0]}"
+        )
+
+    works = sorted(works_by_id.values(), key=lambda work: work.order, reverse=True)[
+        : settings.max_items
+    ]
     logger.debug(f"抖音作者 {author_id} 拉取到 {len(works)} 个作品")
     return works
 
@@ -230,15 +278,16 @@ async def _fetch_post_page(
     client: httpx.AsyncClient,
     sec_user_id: str,
     max_cursor: str,
+    aid: str,
 ) -> dict[str, Any]:
     """请求一页作者作品，并校验返回码。"""
 
     params = {
         "device_platform": "webapp",
-        # 1128（移动端）的作品列表是实时的；6383（PC web）会滞后好几天 ——
-        # 实测 4 个作者里 2 个的最新作品在 6383 的列表里缺失，1128 都在。
-        # 签名方式和其余参数不变，只换客户端号。
-        "aid": "1128",
+        # 1128（移动端）列表实时，但不返回图文（aweme_type=68）；6383（PC web）
+        # 能返回图文，列表却可能滞后数天。fetch() 同时拉两条流再合并，两个
+        # 客户端各自翻页，互不干扰。
+        "aid": aid,
         "channel": "channel_pc_web",
         "sec_user_id": sec_user_id,
         "max_cursor": max_cursor,
@@ -275,10 +324,14 @@ def _parse_work_item(raw: Any, sec_user_id: str) -> PlatformWork | None:
     author = raw.get("author") or {}
     if not isinstance(author, dict):
         author = {}
+    is_note = str(raw.get("aweme_type") or "") == str(NOTE_AWEME_TYPE) or bool(
+        raw.get("image_post_info")
+    )
+    work_path = "note" if is_note else "video"
     return PlatformWork(
         platform="douyin",
         work_id=aweme_id,
-        url=f"https://www.douyin.com/video/{aweme_id}",
+        url=f"https://www.douyin.com/{work_path}/{aweme_id}",
         title=str(raw.get("desc") or ""),
         description=str(raw.get("desc") or ""),
         create_time=int(raw.get("create_time") or 0),

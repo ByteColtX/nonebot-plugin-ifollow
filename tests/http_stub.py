@@ -7,25 +7,34 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx
 import pytest
+
+ResponseHandler = Callable[[httpx.Request], httpx.Response]
+"""按请求返回响应的回调，用于按参数（例如 ``aid``）分流。"""
 
 
 class Stub:
     """按顺序回放预设响应，并记录收到的请求。
 
     请求数超过预设响应数后重复最后一条，方便「一直失败」「一直成功」这类场景。
+    也可以传入回调，按请求内容选择响应，用于并发请求各自走独立队列的场景。
+
+    Args:
+        responses: 预设响应序列，或按请求返回响应的回调。
     """
 
-    def __init__(self, responses: Sequence[httpx.Response]) -> None:
-        self._responses = list(responses)
+    def __init__(self, responses: Sequence[httpx.Response] | ResponseHandler) -> None:
+        self._responses = responses if callable(responses) else list(responses)
         self.requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if callable(self._responses):
+            return self._responses(request)
         index = min(len(self.requests) - 1, len(self._responses) - 1)
         return self._responses[index]
 

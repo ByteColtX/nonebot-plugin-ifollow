@@ -71,18 +71,38 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Any:
     counter = iter(range(100))
     ttwids: list[str] = []
 
-    def factory(responses: list[httpx.Response]) -> Stub:
+    def factory(responses: Any) -> Stub:
         return install(monkeypatch, Stub(responses))
 
     async def ensure_ttwid() -> str:
+        # 和真实实现一样缓存 ttwid：并发双流共享同一次注册，失效后才重新注册。
+        if douyin._ttwid:
+            return douyin._ttwid
         ttwid = f"ttwid-{next(counter)}"
         ttwids.append(ttwid)
+        douyin._ttwid = ttwid
         return ttwid
 
     monkeypatch.setattr(douyin, "_ensure_ttwid", ensure_ttwid)
     monkeypatch.setattr(douyin, "_ttwid", None)
     factory.ttwids = ttwids  # type: ignore[attr-defined]
     return factory
+
+
+def aid_stub(routes: dict[str, list[httpx.Response]]) -> Stub:
+    """按请求的 ``aid`` 回放各自响应，避免并发双流争抢同一条响应队列。"""
+
+    queues = {aid: list(items) for aid, items in routes.items()}
+    counts: dict[str, int] = {}
+
+    def route(request: httpx.Request) -> httpx.Response:
+        aid = request.url.params.get("aid", "")
+        responses = queues[aid]
+        index = counts.get(aid, 0)
+        counts[aid] = index + 1
+        return responses[min(index, len(responses) - 1)]
+
+    return Stub(route)
 
 
 def test_signed_query_appends_encoded_a_bogus() -> None:
@@ -136,7 +156,7 @@ async def test_fetch_latest_works_retries_with_new_ttwid_on_empty_body(
 
     assert works[0].work_id == "100"
     assert client.ttwids == ["ttwid-0", "ttwid-1"]
-    assert douyin._ttwid is None
+    assert douyin._ttwid == "ttwid-1"
 
 
 @pytest.mark.asyncio
@@ -209,35 +229,48 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
     """停机久了要按页补齐，直到翻到游标作品。"""
 
     created = client(
-        [
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": True,
-                    "max_cursor": "50",
-                    "aweme_list": [
-                        {
-                            "aweme_id": "103",
-                            "create_time": 30,
-                            "author": {"nickname": "作者"},
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": True,
+                            "max_cursor": "50",
+                            "aweme_list": [
+                                {
+                                    "aweme_id": "103",
+                                    "create_time": 30,
+                                    "author": {"nickname": "作者"},
+                                }
+                            ],
                         }
-                    ],
-                }
-            ),
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": False,
-                    "aweme_list": [
-                        {
-                            "aweme_id": "100",
-                            "create_time": 10,
-                            "author": {"nickname": "作者"},
+                    ),
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [
+                                {
+                                    "aweme_id": "100",
+                                    "create_time": 10,
+                                    "author": {"nickname": "作者"},
+                                }
+                            ],
                         }
-                    ],
-                }
-            ),
-        ]
+                    ),
+                ],
+                douyin.AID_WEB: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [],
+                        }
+                    )
+                ],
+            }
+        )
     )
 
     works = await douyin.fetch(
@@ -245,7 +278,7 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
     )
 
     assert [work.work_id for work in works] == ["103", "100"]
-    assert len(created.requests) == 2
+    assert len(created.requests) == 3
 
 
 @pytest.mark.asyncio
@@ -274,15 +307,15 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
 
     assert [work.work_id for work in works] == ["103"]
-    assert len(created.requests) == 1
+    assert len(created.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_works_uses_mobile_aid(client: Any) -> None:
-    """作品列表必须用 aid=1128。
+async def test_fetch_latest_works_queries_both_aids(client: Any) -> None:
+    """作品列表必须同时查 1128 和 6383。
 
-    6383（PC web）的作品列表会滞后好几天：实测 4 个作者里 2 个的最新作品
-    在 6383 的返回里缺失，换 1128 就都在。首次订阅的「最后更新」也因此变准。
+    1128（移动端）列表实时，但不返回图文（aweme_type=68）；6383（PC web）能返回
+    图文，列表却可能滞后数天。只查任意一个都会漏内容。
     """
 
     created = client(
@@ -306,7 +339,175 @@ async def test_fetch_latest_works_uses_mobile_aid(client: Any) -> None:
 
     await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
 
-    assert created.requests[0].url.params["aid"] == "1128"
+    assert {request.url.params["aid"] for request in created.requests} == {
+        douyin.AID_MOBILE,
+        douyin.AID_WEB,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_returns_image_posts_from_web_aid(client: Any) -> None:
+    """1128 返回空时，6383 的图文仍要正常返回，并使用 note 链接。"""
+
+    client(
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [],
+                        }
+                    )
+                ],
+                douyin.AID_WEB: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [
+                                {
+                                    "aweme_id": "200",
+                                    "aweme_type": 68,
+                                    "create_time": 40,
+                                    "desc": "图文作品",
+                                    "author": {"nickname": "作者"},
+                                }
+                            ],
+                        }
+                    )
+                ],
+            }
+        )
+    )
+
+    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+
+    assert [work.work_id for work in works] == ["200"]
+    assert works[0].url == "https://www.douyin.com/note/200"
+
+
+@pytest.mark.asyncio
+async def test_fetch_merges_and_dedupes_both_aids(client: Any) -> None:
+    """两条流重复的作品只保留一份，并按发布时间倒序合并。"""
+
+    client(
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [
+                                {
+                                    "aweme_id": "201",
+                                    "create_time": 50,
+                                    "author": {"nickname": "作者"},
+                                },
+                                {
+                                    "aweme_id": "200",
+                                    "create_time": 40,
+                                    "author": {"nickname": "作者"},
+                                },
+                            ],
+                        }
+                    )
+                ],
+                douyin.AID_WEB: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [
+                                {
+                                    "aweme_id": "200",
+                                    "aweme_type": 68,
+                                    "create_time": 40,
+                                    "author": {"nickname": "作者"},
+                                },
+                                {
+                                    "aweme_id": "199",
+                                    "aweme_type": 68,
+                                    "create_time": 30,
+                                    "author": {"nickname": "作者"},
+                                },
+                            ],
+                        }
+                    )
+                ],
+            }
+        )
+    )
+
+    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+
+    assert [work.work_id for work in works] == ["201", "200", "199"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_uses_remaining_aid_when_one_fails(client: Any) -> None:
+    """一条流被风控时，另一条流的结果仍要返回。"""
+
+    client(
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [
+                    response(status_code=403, content=b"Blocked"),
+                    response(status_code=403, content=b"Blocked"),
+                ],
+                douyin.AID_WEB: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [
+                                {
+                                    "aweme_id": "300",
+                                    "aweme_type": 68,
+                                    "create_time": 60,
+                                    "author": {"nickname": "作者"},
+                                }
+                            ],
+                        }
+                    )
+                ],
+            }
+        )
+    )
+
+    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+
+    assert [work.work_id for work in works] == ["300"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_raises_when_empty_result_hides_failed_aid(client: Any) -> None:
+    """一条流成功但为空、另一条流失败时，不能把失败当成「没有新作品」。"""
+
+    client(
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [
+                    response(
+                        data={
+                            "status_code": 0,
+                            "has_more": False,
+                            "aweme_list": [],
+                        }
+                    )
+                ],
+                douyin.AID_WEB: [
+                    response(status_code=403, content=b"Blocked"),
+                    response(status_code=403, content=b"Blocked"),
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(TransientError):
+        await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
 
 
 @pytest.mark.asyncio
@@ -331,8 +532,8 @@ async def test_fetch_latest_works_omits_count_and_stops_at_limit(
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video", Cursor("old", 1))
 
     assert len(works) == 5
-    assert len(created.requests) == 1
-    assert "count=" not in str(created.requests[0].url)
+    assert len(created.requests) == 2
+    assert all("count=" not in str(request.url) for request in created.requests)
 
 
 @pytest.mark.asyncio
@@ -391,36 +592,51 @@ async def test_resolve_author_backfills_handle_from_profile(client: Any) -> None
     payload = _works_payload(count=1)
     payload["aweme_list"][0]["author"] = {"nickname": "作者"}
     created = client(
-        [
-            response(data=payload),
-            response(
-                data={
-                    "status_code": 0,
-                    "user": {"nickname": "作者", "unique_id": "30086054030"},
-                }
-            ),
-        ]
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [response(data=payload)],
+                douyin.AID_WEB: [
+                    response(data={"status_code": 0, "aweme_list": []}),
+                    response(
+                        data={
+                            "status_code": 0,
+                            "user": {
+                                "nickname": "作者",
+                                "unique_id": "30086054030",
+                            },
+                        }
+                    ),
+                ],
+            }
+        )
     )
 
     resolved = await douyin.resolve_author(SETTINGS, "MS4wLjABAAAA-test")
 
     assert resolved.author.handle == "30086054030"
-    assert len(created.requests) == 2
-    assert created.requests[1].url.path == "/aweme/v1/web/user/profile/other/"
+    assert len(created.requests) == 3
+    assert created.requests[-1].url.path == "/aweme/v1/web/user/profile/other/"
 
 
 @pytest.mark.asyncio
 async def test_resolve_author_falls_back_to_profile(client: Any) -> None:
     client(
-        [
-            response(data={"status_code": 0, "aweme_list": []}),
-            response(
-                data={
-                    "status_code": 0,
-                    "user": {"nickname": "作者", "unique_id": "deagle"},
-                }
-            ),
-        ]
+        aid_stub(
+            {
+                douyin.AID_MOBILE: [
+                    response(data={"status_code": 0, "aweme_list": []})
+                ],
+                douyin.AID_WEB: [
+                    response(data={"status_code": 0, "aweme_list": []}),
+                    response(
+                        data={
+                            "status_code": 0,
+                            "user": {"nickname": "作者", "unique_id": "deagle"},
+                        }
+                    ),
+                ],
+            }
+        )
     )
 
     resolved = await douyin.resolve_author(SETTINGS, "MS4wLjABAAAA-test")
