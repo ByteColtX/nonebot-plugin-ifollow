@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -127,6 +128,54 @@ async def test_remove_subscriber_keeps_target_for_others(tmp_path: Path) -> None
     )
     snapshot = await store.snapshot()
     assert snapshot["bilibili:1"].targets[target_key].subscriber_ids == ["43"]
+
+
+@pytest.mark.asyncio
+async def test_mention_switch_roundtrip(tmp_path: Path) -> None:
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target(
+        "douyin", "sec", "作者", target_key, target(), {}, subscriber_id="42"
+    )
+    snapshot = await store.snapshot()
+
+    assert snapshot["douyin:sec"].targets[target_key].mention is True
+    assert await store.set_mention("douyin", "sec", target_key, False) is True
+    assert await store.set_mention("douyin", "sec", target_key, False) is False
+    assert await store.set_mention("douyin", "missing", target_key, False) is False
+
+    await store.flush()
+    raw = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
+    assert raw["subscriptions"][0]["targets"][0]["mention"] is False
+
+    reloaded = await SubscriptionStore(tmp_path).snapshot()
+    assert reloaded["douyin:sec"].targets[target_key].mention is False
+
+
+@pytest.mark.asyncio
+async def test_missing_mention_field_defaults_to_enabled(tmp_path: Path) -> None:
+    payload = {
+        "version": STORAGE_VERSION,
+        "subscriptions": [
+            {
+                "platform": "douyin",
+                "author_id": "sec",
+                "name": "作者",
+                "targets": [
+                    {
+                        "target": target(),
+                        "subscribers": ["42"],
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "subscriptions.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    snapshot = await SubscriptionStore(tmp_path).snapshot()
+
+    target_key = make_target_key(target())
+    assert snapshot["douyin:sec"].targets[target_key].mention is True
 
 
 @pytest.mark.asyncio

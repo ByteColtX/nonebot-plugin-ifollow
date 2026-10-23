@@ -15,6 +15,7 @@ from .status import platform_name
 from .style import (
     HELP_COMMAND,
     LIST_COMMAND,
+    NOTIFY_COMMAND,
     SEPARATOR,
     STATUS_COMMAND,
     SUBSCRIBE_COMMAND,
@@ -33,6 +34,8 @@ def help_message() -> str:
         f"· {LIST_COMMAND}\n"
         f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接>\n"
         "  （只能退自己的；群管理、群主和机器人管理员可退本群任何订阅）\n"
+        f"· {NOTIFY_COMMAND} 开|关\n"
+        "  （群管理 / 群主 / 机器人管理员，私聊订阅人；只影响新作品里的 @）\n"
         f"· {STATUS_COMMAND}（仅超级用户）\n"
         f"{SEPARATOR}\n"
         f"引用含链接的消息后发送 {SUBSCRIBE_COMMAND} 也能订阅。\n"
@@ -49,6 +52,7 @@ def usage() -> str:
             command_text(SUBSCRIBE_COMMAND, "<作者主页或作品链接>"),
             command_text(LIST_COMMAND),
             command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>"),
+            command_text(NOTIFY_COMMAND, "开|关"),
             f"{command_text(STATUS_COMMAND)}（超级用户）",
         )
     )

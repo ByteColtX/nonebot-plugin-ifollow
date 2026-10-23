@@ -11,8 +11,9 @@ HELP_COMMAND = "爱播帮助"
 SUBSCRIBE_COMMAND = "爱播订阅"
 UNSUBSCRIBE_COMMAND = "爱播退订"
 LIST_COMMAND = "爱播列表"
+NOTIFY_COMMAND = "爱播提醒"
 STATUS_COMMAND = "爱播状态"
-"""五个命令的唯一名字：一个功能只对应一个 ``爱播X``。"""
+"""六个命令的唯一名字：一个功能只对应一个 ``爱播X``。"""
 
 
 def platform_name(platform: str) -> str:
@@ -40,6 +41,7 @@ def command_text(name: str, args: str = "") -> str:
 __all__ = [
     "HELP_COMMAND",
     "LIST_COMMAND",
+    "NOTIFY_COMMAND",
     "SEPARATOR",
     "STATUS_COMMAND",
     "SUBSCRIBE_COMMAND",

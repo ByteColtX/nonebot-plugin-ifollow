@@ -776,10 +776,11 @@ async def test_sent_memory_is_scoped_per_author(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mention", [True, False])
 async def test_send_work_appends_subscriber_mentions(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, mention: bool
 ) -> None:
-    """订阅人提醒拼在文案末尾，不额外多发一条消息。"""
+    """订阅人提醒拼在文案末尾；开关关闭时连分隔线也不追加。"""
 
     sent: list[tuple[str, str]] = []
 
@@ -800,12 +801,18 @@ async def test_send_work_appends_subscriber_mentions(
 
     monkeypatch.setattr(delivery, "UniMessage", RecordingMessage)
     target = Target.group("group")
-    state = TargetSubscription(target.dump(), subscriber_ids=["1", "2"])
+    state = TargetSubscription(
+        target.dump(), subscriber_ids=["1", "2"], mention=mention
+    )
 
     await delivery.send_work([RecordingMessage("文案")], state)  # type: ignore[list-item]
 
     text, target_id = sent[0]
     assert target_id == "group"
-    assert delivery.SEPARATOR in text
-    assert "@1" in text
-    assert "@2" in text
+    if mention:
+        assert delivery.SEPARATOR in text
+        assert "@1" in text
+        assert "@2" in text
+    else:
+        assert delivery.SEPARATOR not in text
+        assert "@" not in text

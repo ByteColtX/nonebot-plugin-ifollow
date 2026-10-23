@@ -498,6 +498,136 @@ async def test_unsubscribe_superuser_cancels_legacy_entry(env: Any) -> None:
     assert await store.snapshot() == {}
 
 
+@pytest.mark.asyncio
+async def test_notify_status_defaults_on(env: Any) -> None:
+    store, _ = env
+    await seed_subscription(store)
+
+    await commands.notify_command(make_event(), Mock(), args(""))
+
+    assert FakeUniMessage.sent == [
+        "爱播提醒：本会话 @ 提醒已开启（共 1 个订阅）\n设置：/爱播提醒 开|关。"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notify_admin_can_disable_all(env: Any, tmp_path: Path) -> None:
+    store, _ = env
+    key = await seed_subscription(store)
+    event = make_event(user_id="99")
+    event.sender.role = "admin"
+
+    await commands.notify_command(event, Mock(), args("关"))
+
+    assert FakeUniMessage.sent == ["已关闭本会话 1 个订阅的 @ 提醒。新作品仍会发送。"]
+    snapshot = await store.snapshot()
+    assert snapshot["douyin:sec"].targets[key].mention is False
+    reloaded = await SubscriptionStore(tmp_path).snapshot()
+    assert reloaded["douyin:sec"].targets[key].mention is False
+
+
+@pytest.mark.asyncio
+async def test_notify_rejects_invalid_switch(env: Any) -> None:
+    store, _ = env
+    await seed_subscription(store)
+    event = make_event(user_id="99")
+    event.sender.role = "admin"
+
+    with pytest.raises(FinishedException):
+        await commands.notify_command(event, Mock(), args("也许"))
+
+    assert FakeUniMessage.sent[0].startswith("用法：/爱播提醒 开|关")
+
+
+@pytest.mark.asyncio
+async def test_notify_without_subscriptions(env: Any) -> None:
+    with pytest.raises(FinishedException):
+        await commands.notify_command(make_event(), Mock(), args("关"))
+
+    assert FakeUniMessage.sent == [
+        "当前会话没有爱播订阅。\n发送 /爱播订阅 <作者主页链接> 开始订阅。"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notify_reports_already_disabled(env: Any) -> None:
+    store, _ = env
+    key = await seed_subscription(store)
+    await store.set_mention("douyin", "sec", key, False)
+    event = make_event(user_id="99")
+    event.sender.role = "admin"
+
+    await commands.notify_command(event, Mock(), args("关"))
+
+    assert FakeUniMessage.sent == ["本会话的 @ 提醒已经是关闭状态。"]
+
+
+@pytest.mark.asyncio
+async def test_notify_member_cannot_change(env: Any) -> None:
+    store, _ = env
+    key = await seed_subscription(store)
+
+    with pytest.raises(FinishedException):
+        await commands.notify_command(make_event(user_id="42"), Mock(), args("关"))
+
+    assert FakeUniMessage.sent == [
+        "只有群主、群管理员或机器人超级用户可以设置 @ 提醒。"
+    ]
+    snapshot = await store.snapshot()
+    assert snapshot["douyin:sec"].targets[key].mention is True
+
+
+@pytest.mark.asyncio
+async def test_notify_private_subscriber_can_change(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = env
+    target = Target.user("42")
+    key = make_target_key(target.dump())
+    await store.add_target(
+        "douyin",
+        "sec",
+        "作者",
+        key,
+        target.dump(),
+        {"video": Cursor("old", 1)},
+        subscriber_id="42",
+    )
+    monkeypatch.setattr(commands, "get_target", lambda _event, _bot: target)
+
+    await commands.notify_command(make_event(user_id="42"), Mock(), args("关"))
+
+    assert FakeUniMessage.sent == ["已关闭本会话 1 个订阅的 @ 提醒。新作品仍会发送。"]
+    snapshot = await store.snapshot()
+    assert snapshot["douyin:sec"].targets[key].mention is False
+
+
+@pytest.mark.asyncio
+async def test_notify_private_non_subscriber_cannot_change(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = env
+    target = Target.user("42")
+    key = make_target_key(target.dump())
+    await store.add_target(
+        "douyin",
+        "sec",
+        "作者",
+        key,
+        target.dump(),
+        {"video": Cursor("old", 1)},
+        subscriber_id="42",
+    )
+    monkeypatch.setattr(commands, "get_target", lambda _event, _bot: target)
+
+    with pytest.raises(FinishedException):
+        await commands.notify_command(make_event(user_id="77"), Mock(), args("关"))
+
+    assert FakeUniMessage.sent == ["只有本会话的订阅人可以设置 @ 提醒。"]
+    snapshot = await store.snapshot()
+    assert snapshot["douyin:sec"].targets[key].mention is True
+
+
 class FakeReply:
     """只带 message 字段的引用消息，和 OneBot 的 Reply 一致。"""
 

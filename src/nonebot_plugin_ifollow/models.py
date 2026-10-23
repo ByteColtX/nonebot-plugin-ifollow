@@ -81,6 +81,8 @@ class TargetSubscription:
     target: dict[str, Any]
     cursors: dict[str, Cursor] = field(default_factory=dict)
     subscriber_ids: list[str] = field(default_factory=list)
+    mention: bool = True
+    """新作品通知是否 @ 本会话的订阅人。"""
 
 
 @dataclass
@@ -167,6 +169,9 @@ class SubscriptionStore:
             subscribers = target_item.get("subscribers", [])
             if not isinstance(subscribers, list):
                 raise TypeError("订阅人必须是数组")
+            mention = target_item.get("mention", True)
+            if not isinstance(mention, bool):
+                raise TypeError("提醒开关必须是布尔值")
             target_key = make_target_key(target)
             targets[target_key] = TargetSubscription(
                 target=target,
@@ -175,6 +180,7 @@ class SubscriptionStore:
                     for feed, value in cursors.items()
                 },
                 subscriber_ids=[str(value) for value in subscribers],
+                mention=mention,
             )
         author = AuthorSubscription(
             platform=platform,
@@ -201,6 +207,7 @@ class SubscriptionStore:
                             target.target.copy(),
                             dict(target.cursors),
                             list(target.subscriber_ids),
+                            target.mention,
                         )
                         for target_key, target in value.targets.items()
                     },
@@ -330,6 +337,35 @@ class SubscriptionStore:
                 target.cursors[feed] = cursor
                 self._dirty = True
 
+    async def set_mention(
+        self,
+        platform: Platform,
+        author_id: str,
+        target_key: str,
+        enabled: bool,
+    ) -> bool:
+        """设置某个目标是否 @ 订阅人，返回是否发生变化。
+
+        Args:
+            platform: 平台。
+            author_id: 作者 ID。
+            target_key: 目标会话键。
+            enabled: 是否在新作品通知里 @ 订阅人。
+
+        Returns:
+            设置发生变化时返回 ``True``；目标不存在或值未变化时返回 ``False``。
+        """
+
+        async with self._lock:
+            await self._ensure_loaded()
+            author = self._authors.get(f"{platform}:{author_id}")
+            target = author.targets.get(target_key) if author else None
+            if target is None or target.mention == enabled:
+                return False
+            target.mention = enabled
+            self._dirty = True
+            return True
+
     async def update_author_metadata(
         self,
         platform: Platform,
@@ -427,6 +463,8 @@ class SubscriptionStore:
                 }
             if target.subscriber_ids:
                 target_item["subscribers"] = target.subscriber_ids
+            if not target.mention:
+                target_item["mention"] = False
             item["targets"].append(target_item)
         return item
 

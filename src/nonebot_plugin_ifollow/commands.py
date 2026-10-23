@@ -1,4 +1,4 @@
-"""爱播命令：帮助、订阅、退订、列表与状态。"""
+"""爱播命令：帮助、订阅、退订、列表、提醒与状态。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from .status import platform_name
 from .style import (
     HELP_COMMAND,
     LIST_COMMAND,
+    NOTIFY_COMMAND,
     STATUS_COMMAND,
     SUBSCRIBE_COMMAND,
     UNSUBSCRIBE_COMMAND,
@@ -29,6 +30,7 @@ HELP = on_command(HELP_COMMAND, priority=5, block=True)
 SUBSCRIBE = on_command(SUBSCRIBE_COMMAND, priority=5, block=True)
 UNSUBSCRIBE = on_command(UNSUBSCRIBE_COMMAND, priority=5, block=True)
 LIST = on_command(LIST_COMMAND, priority=5, block=True)
+NOTIFY = on_command(NOTIFY_COMMAND, priority=5, block=True)
 STATUS = on_command(STATUS_COMMAND, priority=5, block=True)
 
 
@@ -295,6 +297,94 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         await UniMessage(
             f"「{label}」不是你订阅的，只有订阅人、群管理或机器人管理员可以退订。"
         ).send(target=target, bot=bot)
+
+
+_SWITCH_VALUES: dict[str, bool] = {
+    "开": True,
+    "开启": True,
+    "启用": True,
+    "on": True,
+    "true": True,
+    "关": False,
+    "关闭": False,
+    "停用": False,
+    "off": False,
+    "false": False,
+}
+
+
+def parse_switch(value: str) -> bool | None:
+    """把「开 / 关」解析成布尔值；无法识别时返回 ``None``。"""
+
+    return _SWITCH_VALUES.get(value.strip().lower())
+
+
+def _notify_status(items: list[AuthorSubscription], target_key: str) -> str:
+    """生成提醒开关的当前状态。"""
+
+    total = len(items)
+    off = sum(1 for author in items if not author.targets[target_key].mention)
+    if off == 0:
+        state = "已开启"
+    elif off == total:
+        state = "已关闭"
+    else:
+        state = f"{off}/{total} 个订阅已关闭"
+    return (
+        f"{NOTIFY_COMMAND}：本会话 @ 提醒{state}（共 {total} 个订阅）\n"
+        f"设置：{command_text(NOTIFY_COMMAND, '开|关')}。"
+    )
+
+
+@NOTIFY.handle()
+async def notify_command(event: Event, bot: Bot, args: Message = CommandArg()) -> None:
+    """开关当前会话新作品通知里的 @ 提醒。
+
+    群聊仅群主、群管理员和机器人超级用户可设置；私聊由订阅人自己设置。
+    不带参数时查看当前状态。
+    """
+
+    context = runtime()
+    raw = args.extract_plain_text().strip()
+    target = get_target(event, bot)
+    target_key = make_target_key(target.dump())
+    authors = await context.store.snapshot()
+    items = formatting.target_subscriptions(authors, target_key)
+    if not items:
+        await UniMessage(formatting.empty_subscription_message()).finish()
+    if not raw:
+        await UniMessage(_notify_status(items, target_key)).send(target=target, bot=bot)
+        return
+    switch = parse_switch(raw)
+    if switch is None:
+        usage = command_text(NOTIFY_COMMAND, "开|关")
+        await UniMessage(f"用法：{usage}").finish()
+    user_id = event.get_user_id()
+    private = bool(getattr(target, "private", False))
+    manage = can_manage(event)
+    if private and not manage:
+        subscribed = any(
+            user_id in author.targets[target_key].subscriber_ids for author in items
+        )
+        if not subscribed:
+            await UniMessage("只有本会话的订阅人可以设置 @ 提醒。").finish()
+    elif not private and not manage:
+        await UniMessage("只有群主、群管理员或机器人超级用户可以设置 @ 提醒。").finish()
+    changed = 0
+    async with context.store.transaction():
+        for author in items:
+            if await context.store.set_mention(
+                author.platform, author.author_id, target_key, switch
+            ):
+                changed += 1
+    state = "开启" if switch else "关闭"
+    if changed:
+        text = f"已{state}本会话 {len(items)} 个订阅的 @ 提醒。"
+        if not switch:
+            text += "新作品仍会发送。"
+    else:
+        text = f"本会话的 @ 提醒已经是{state}状态。"
+    await UniMessage(text).send(target=target, bot=bot)
 
 
 @LIST.handle()

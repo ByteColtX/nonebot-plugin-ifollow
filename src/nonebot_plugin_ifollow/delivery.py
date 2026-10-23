@@ -257,7 +257,7 @@ async def send_work(
 
     target = Target.load(target_state.target.copy())
     outgoing: list[UniMessage] = list(messages)
-    if messages and target_state.subscriber_ids:
+    if messages and target_state.mention and target_state.subscriber_ids:
         footer = UniMessage(f"\n{SEPARATOR}\n")
         for index, subscriber_id in enumerate(target_state.subscriber_ids):
             if index:
