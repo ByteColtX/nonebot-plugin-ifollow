@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - v*
+  release:
+    types: [published]
 
 jobs:
   release:
@@ -16,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -25,35 +26,20 @@ jobs:
       - name: Get Version
         id: version
         run: |
-          echo "VERSION=$(uv version --short)" >> $GITHUB_OUTPUT
-          echo "TAG_VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-          echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          TAG="${{ github.event.release.tag_name }}"
+          echo "VERSION=$(uv version --short)" >> "$GITHUB_OUTPUT"
+          echo "TAG_NAME=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TAG_VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Check Version
         if: steps.version.outputs.VERSION != steps.version.outputs.TAG_VERSION
         run: exit 1
-      - name: Extract Release Notes
-        run: |
-          uv run --no-project scripts/release_notes.py \
-            --version "${{ steps.version.outputs.VERSION }}" \
-            --output "$RUNNER_TEMP/release-notes.md"
       - name: Test
         run: uv run poe test
       - name: Build and publish
         run: |
           uv build
           uv publish --check-url https://pypi.org/simple/
-      - name: Ensure GitHub Release
-        run: |
-          TAG="${{ steps.version.outputs.TAG_NAME }}"
-          NOTES="$RUNNER_TEMP/release-notes.md"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --notes-file "$NOTES"
-          else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload Release Asset
-        run: gh release upload --clobber ${{ steps.version.outputs.TAG_NAME }} dist/*.tar.gz dist/*.whl
+        run: gh release upload "${{ steps.version.outputs.TAG_NAME }}" dist/*.tar.gz dist/*.whl --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

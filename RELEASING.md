@@ -1,18 +1,17 @@
 # 发布流程
 
-一句话：先在 `CHANGELOG.md` 写好版本段落并提交，再用 bump-my-version 提升版本并打标签，推送标签后由 CI 发布。
+一句话：改动走 PR 合入 `main`，版本提升单独提一个 PR，然后在 GitHub 创建带自动生成说明的 Release；
+CI 从 Release 事件构建、发布 PyPI，并把产物挂回该 Release。
 
 ## 唯一事实来源
 
 | 内容 | 位置 |
 |---|---|
-| 版本号 | `pyproject.toml` 的 `project.version` 与 `[tool.bumpversion] current_version` |
-| 变更日志 | `CHANGELOG.md` 中 `## <version> - <YYYY-MM-DD>` 段落 |
-| 标签 | `v<version>`，签名 annotated tag |
-| 发布说明 | `CHANGELOG.md` 对应版本段落，由 `scripts/release_notes.py` 提取 |
+| 版本号 | `pyproject.toml` 的 `project.version`（`uv version` 会同步 `uv.lock`） |
+| 标签 | GitHub Release 创建的 `v<version>` |
+| 发布说明 | GitHub 根据已合并 PR 自动生成，不再维护 `CHANGELOG.md` |
 
-三者必须一致。`Release` workflow 会在发布到 PyPI **之前**校验版本与标签一致、并确认 CHANGELOG 有对应段落；
-任一不满足都会失败，不会产生半成品发布。
+`Release` workflow 会在发布到 PyPI **之前**校验 `project.version` 与 Release 标签一致；不一致直接失败。
 
 ## 版本号规则
 
@@ -21,9 +20,6 @@
 | 破坏性变更 | major |
 | 新功能 | minor |
 | 修复、文档、依赖、重构 | patch |
-
-判断依据是 `git log <last-tag>..HEAD` 里的 conventional commit 类型：`feat` → minor，
-`!` 或 `BREAKING CHANGE:` → major，其余 → patch。
 
 ## 步骤
 
@@ -36,77 +32,61 @@ uv sync
 uv run poe test
 ```
 
-要求工作区干净：bump-my-version 默认拒绝在脏工作区执行，这正好保证变更日志先提交。
+要求 CI 通过、工作区干净。
 
-### 2. 写变更日志
-
-用 `/release-skills`（读取 `.releaserc.yml`，按提交自动分类）或手动在 `CHANGELOG.md` 顶部新增：
-
-```markdown
-## 2.1.0 - 2026-10-22
-
-### 新功能
-
-- 一句话描述用户能感知的变化
-```
-
-- 标题固定为 `## <version> - <YYYY-MM-DD>`，不加 `v`、不加方括号。
-- 只记录用户能感知的变化；`chore` 不记录。
-- 破坏性变更放在最前面的「破坏性变更」小节。
-- 提交：`git commit -m "docs(changelog): 记录 2.1.0 变更"`
-
-### 3. 提升版本
+### 2. 版本提升 PR
 
 ```bash
-uv run poe bump minor   # patch / minor / major
+git switch -c chore/bump-2.3.0
+uv version --bump minor      # patch / minor / major；会同时更新 uv.lock
+git add pyproject.toml uv.lock
+git commit -m "chore(version): 升级版本号至 2.3.0"
+git push -u origin chore/bump-2.3.0
 ```
 
-bump-my-version 会：
+用 `gh pr create` 或在 GitHub 上开 PR，等 CI 通过后合并到 `main`。版本提升必须单独一个 PR，
+不要和功能改动混在一起。
 
-- 同步更新 `pyproject.toml` 与 `uv.lock`；
-- 提交 `chore(release): 将版本从 A 更新至 B`；
-- 创建签名标签 `vB`。
+### 3. 创建 GitHub Release
 
-先看候选版本：`uv run poe show-bump`。
+在 GitHub 的 **Releases → Draft a new release**：
 
-### 4. 推送
+1. Tag 填 `v2.3.0`，Target 选 `main`；
+2. 标题填 `v2.3.0`；
+3. 点 **Generate release notes**，检查生成的内容；
+4. 发布。
+
+或者用 CLI：
 
 ```bash
-git push origin main --follow-tags
+gh release create v2.3.0 --target main --title v2.3.0 --generate-notes
 ```
 
-### 5. CI 自动发布
+发布说明来自**已合并的 PR**，直接 push 到 `main` 的 commit 不会出现在里面。所有用户可感知的改动
+都必须走 PR，PR 标题按 Conventional Commits 写。
 
-`Release` workflow（`.github/workflows/release.yml`）在标签推送后：
+> 需要签名 tag 时，先本地 `git tag -s v2.3.0` 并推送，再用
+> `gh release create v2.3.0 --verify-tag --generate-notes` 创建 Release；其余步骤不变。
 
-1. 校验 `project.version` 与标签版本一致；
-2. 从 `CHANGELOG.md` 提取发布说明，缺失则失败；
-3. 跑一遍 `uv run poe test`，避免标签指向未通过测试的提交；
+### 4. CI 自动发布
+
+Release 发布后，`Release` workflow（`.github/workflows/release.yml`）会：
+
+1. checkout Release 对应的标签；
+2. 校验 `project.version` 与标签版本一致；
+3. 跑一遍 `uv run poe test`；
 4. `uv build`，用 PyPI Trusted Publishing 发布（`--check-url`，重跑不会因文件已存在而失败）；
-5. 创建或更新 GitHub Release（说明来自 CHANGELOG），上传 `dist/*.whl` 与 `dist/*.tar.gz`。
+5. 把 `dist/*.whl` 与 `dist/*.tar.gz` 上传到该 Release（`--clobber`，可重复执行）。
 
-## 预览发布说明
-
-```bash
-uv run --no-project scripts/release_notes.py --version 2.0.7
-```
-
-## 回填历史 GitHub Release
-
-已有标签缺少 Release 时：
-
-```bash
-/release-skills --backfill-releases
-```
-
-按 `CHANGELOG.md` 的段落创建 Release，不修改已有标签。
+如果仓库配置了 `release` environment 的保护规则，需要在 Actions 页面批准一次。
 
 ## 故障处理
 
 | 现象 | 处理 |
 |---|---|
-| PyPI 发布前失败（测试、版本、CHANGELOG） | 修正后重跑；确实要改标签指向时，只能在 PyPI 发布前删除远端标签再重推 |
-| PyPI 发布后失败（GitHub Release、附件） | 直接重跑，`--check-url` 会跳过已上传文件；不要移动标签 |
-| 版本号与标签不一致 | 在发布前就会失败；删除本地标签，修正后重新 bump |
+| 版本号与标签不一致 | workflow 在发布前失败；删除该 Release 与标签，修正版本 PR 后重新创建 |
+| PyPI 发布前失败（测试、版本） | 修正后重跑 workflow；标签不要移动 |
+| PyPI 发布后失败（附件上传） | 直接重跑 workflow；`--check-url` 与 `--clobber` 保证幂等 |
 | 需要撤回已发布版本 | PyPI 只能 yank，不能删除后复用版本号；发新的 patch 版本 |
-| 发布说明有误 | 改 `CHANGELOG.md` 对应段落，并编辑 GitHub Release；标签保持不动 |
+| 发布说明有误 | 直接编辑 GitHub Release；没有文件需要同步 |
+| 发布说明缺少某次改动 | 确认改动是通过 PR 合并的；直接 commit 不会进入自动生成说明 |
