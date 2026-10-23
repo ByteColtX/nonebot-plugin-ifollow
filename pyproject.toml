@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-ifollow"
-version = "2.1.0"
+version = "2.2.0"
 description = "NoneBot2 多平台作者更新订阅插件"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -53,7 +53,7 @@ bump = "bump-my-version bump"
 show-bump = "bump-my-version show-bump"
 
 [tool.bumpversion]
-current_version = "2.1.0"
+current_version = "2.2.0"
 commit = true
 message = "chore(release): 将版本从 {current_version} 更新至 {new_version}"
 tag = true
