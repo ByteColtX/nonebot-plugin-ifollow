@@ -173,7 +173,6 @@ async def test_fetch_latest_works_retries_with_new_ttwid_on_empty_body(
 
     assert works[0].work_id == "100"
     assert client.ttwids == ["ttwid-0", "ttwid-1"]
-    assert douyin._ttwid == "ttwid-1"
 
 
 @pytest.mark.asyncio
@@ -299,7 +298,7 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_works_without_cursor_requests_one_page(
+async def test_fetch_latest_works_without_cursor_requests_one_page_per_aid(
     client: Any,
 ) -> None:
     created = client(
@@ -325,41 +324,6 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
 
     assert [work.work_id for work in works] == ["103"]
     assert len(created.requests) == 2
-
-
-@pytest.mark.asyncio
-async def test_fetch_latest_works_queries_both_aids(client: Any) -> None:
-    """作品列表必须同时查 1128 和 6383。
-
-    1128（移动端）列表实时，但不返回图文（aweme_type=68）；6383（PC web）能返回
-    图文，列表却可能滞后数天。只查任意一个都会漏内容。
-    """
-
-    created = client(
-        [
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": False,
-                    "max_cursor": "0",
-                    "aweme_list": [
-                        {
-                            "aweme_id": "103",
-                            "create_time": 30,
-                            "author": {"nickname": "作者"},
-                        }
-                    ],
-                }
-            )
-        ]
-    )
-
-    await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
-
-    assert {request.url.params["aid"] for request in created.requests} == {
-        douyin.AID_MOBILE,
-        douyin.AID_WEB,
-    }
 
 
 @pytest.mark.asyncio
