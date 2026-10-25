@@ -110,6 +110,8 @@ class SubscriptionStore:
         self.path = path / "subscriptions.json" if path else None
         self._lock = asyncio.Lock()
         self._authors: dict[str, AuthorSubscription] = {}
+        self._mentions: dict[str, bool] = {}
+        """会话级 @ 提醒开关；缺省视为开启，新建订阅按这里的值初始化。"""
         self._loaded = False
         self._dirty = False
 
@@ -137,6 +139,7 @@ class SubscriptionStore:
             self._load_json(text)
         except (TypeError, ValueError, KeyError) as exc:
             self._authors.clear()
+            self._mentions.clear()
             logger.warning(f"爱播订阅数据结构无效，将使用空订阅：{exc}")
 
     def _load_json(self, text: str) -> None:
@@ -148,6 +151,16 @@ class SubscriptionStore:
             raise TypeError("订阅列表必须是数组")
         for item in subscriptions:
             self._load_author(item)
+        mentions = raw.get("mentions", {})
+        if not isinstance(mentions, dict):
+            raise TypeError("提醒设置必须是对象")
+        for target_key, enabled in mentions.items():
+            if not isinstance(enabled, bool):
+                raise TypeError("提醒开关必须是布尔值")
+            self._mentions[str(target_key)] = enabled
+        for author in self._authors.values():
+            for target_key, target in author.targets.items():
+                target.mention = self._mentions.get(target_key, True)
 
     def _load_author(self, item: Any) -> None:
         if not isinstance(item, dict):
@@ -173,6 +186,8 @@ class SubscriptionStore:
             if not isinstance(mention, bool):
                 raise TypeError("提醒开关必须是布尔值")
             target_key = make_target_key(target)
+            if not mention:
+                self._mentions.setdefault(target_key, False)
             targets[target_key] = TargetSubscription(
                 target=target,
                 cursors={
@@ -247,6 +262,7 @@ class SubscriptionStore:
                 target,
                 dict(cursors),
                 [subscriber_id] if subscriber_id else [],
+                self._mentions.get(target_key, True),
             )
             self._dirty = True
             return True
@@ -337,34 +353,34 @@ class SubscriptionStore:
                 target.cursors[feed] = cursor
                 self._dirty = True
 
-    async def set_mention(
-        self,
-        platform: Platform,
-        author_id: str,
-        target_key: str,
-        enabled: bool,
-    ) -> bool:
-        """设置某个目标是否 @ 订阅人，返回是否发生变化。
+    async def set_mention(self, target_key: str, enabled: bool) -> bool:
+        """设置会话级 @ 提醒，并同步到该会话已有和之后的订阅。
+
+        开关按会话保存，所以关闭后新订阅的作者也不会 @；开启同理。
 
         Args:
-            platform: 平台。
-            author_id: 作者 ID。
             target_key: 目标会话键。
             enabled: 是否在新作品通知里 @ 订阅人。
 
         Returns:
-            设置发生变化时返回 ``True``；目标不存在或值未变化时返回 ``False``。
+            开关或任一订阅的取值发生变化时返回 ``True``，否则返回 ``False``。
         """
 
         async with self._lock:
             await self._ensure_loaded()
-            author = self._authors.get(f"{platform}:{author_id}")
-            target = author.targets.get(target_key) if author else None
-            if target is None or target.mention == enabled:
-                return False
-            target.mention = enabled
-            self._dirty = True
-            return True
+            changed = self._mentions.get(target_key, True) != enabled
+            if enabled:
+                self._mentions.pop(target_key, None)
+            else:
+                self._mentions[target_key] = False
+            for author in self._authors.values():
+                target = author.targets.get(target_key)
+                if target is not None and target.mention != enabled:
+                    target.mention = enabled
+                    changed = True
+            if changed:
+                self._dirty = True
+            return changed
 
     async def update_author_metadata(
         self,
@@ -422,12 +438,19 @@ class SubscriptionStore:
                 logger.warning(f"爱播订阅数据写入失败，改动保留在内存待重试：{exc}")
 
     def _serialize(self) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "version": STORAGE_VERSION,
             "subscriptions": [
                 self._serialize_author(author) for author in self._authors.values()
             ],
         }
+        mentions = {
+            target_key: enabled
+            for target_key, enabled in self._mentions.items()
+            if not enabled
+        }
+        if mentions:
+            payload["mentions"] = mentions
         return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
     def _write(self, text: str) -> None:

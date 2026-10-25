@@ -527,6 +527,31 @@ async def test_notify_admin_can_disable_all(env: Any, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_notify_off_applies_to_later_subscriptions(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """关闭后新订阅的作者同样不 @。"""
+
+    store, _ = env
+    key = await seed_subscription(store)
+    event = make_event(user_id="99")
+    event.sender.role = "admin"
+    await commands.notify_command(event, Mock(), args("关"))
+
+    adapter = FakeAdapter(author=AuthorInfo("new", "新作者", "newhandle"))
+    monkeypatch.setattr(commands, "detect", lambda _value: adapter)
+    await commands.subscribe(make_event(), Mock(), args("new"))
+
+    snapshot = await store.snapshot()
+    assert snapshot["douyin:new"].targets[key].mention is False
+
+    await commands.notify_command(event, Mock(), args(""))
+    assert FakeUniMessage.sent[-1] == (
+        "爱播提醒：本会话 @ 提醒已关闭（共 2 个订阅）\n设置：/爱播提醒 开|关。"
+    )
+
+
+@pytest.mark.asyncio
 async def test_notify_rejects_invalid_switch(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)
@@ -553,7 +578,7 @@ async def test_notify_without_subscriptions(env: Any) -> None:
 async def test_notify_reports_already_disabled(env: Any) -> None:
     store, _ = env
     key = await seed_subscription(store)
-    await store.set_mention("douyin", "sec", key, False)
+    await store.set_mention(key, False)
     event = make_event(user_id="99")
     event.sender.role = "admin"
 
