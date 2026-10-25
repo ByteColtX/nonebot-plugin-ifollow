@@ -370,13 +370,8 @@ async def notify_command(event: Event, bot: Bot, args: Message = CommandArg()) -
             await UniMessage("只有本会话的订阅人可以设置 @ 提醒。").finish()
     elif not private and not manage:
         await UniMessage("只有群主、群管理员或机器人超级用户可以设置 @ 提醒。").finish()
-    changed = 0
     async with context.store.transaction():
-        for author in items:
-            if await context.store.set_mention(
-                author.platform, author.author_id, target_key, switch
-            ):
-                changed += 1
+        changed = await context.store.set_mention(target_key, switch)
     state = "开启" if switch else "关闭"
     if changed:
         text = f"已{state}本会话 {len(items)} 个订阅的 @ 提醒。"

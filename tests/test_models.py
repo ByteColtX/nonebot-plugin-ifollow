@@ -140,16 +140,77 @@ async def test_mention_switch_roundtrip(tmp_path: Path) -> None:
     snapshot = await store.snapshot()
 
     assert snapshot["douyin:sec"].targets[target_key].mention is True
-    assert await store.set_mention("douyin", "sec", target_key, False) is True
-    assert await store.set_mention("douyin", "sec", target_key, False) is False
-    assert await store.set_mention("douyin", "missing", target_key, False) is False
+    assert await store.set_mention(target_key, False) is True
+    assert await store.set_mention(target_key, False) is False
+    assert await store.set_mention(target_key, True) is True
+    assert await store.set_mention(target_key, True) is False
 
+    await store.set_mention(target_key, False)
     await store.flush()
     raw = json.loads((tmp_path / "subscriptions.json").read_text(encoding="utf-8"))
     assert raw["subscriptions"][0]["targets"][0]["mention"] is False
+    assert raw["mentions"] == {target_key: False}
 
     reloaded = await SubscriptionStore(tmp_path).snapshot()
     assert reloaded["douyin:sec"].targets[target_key].mention is False
+
+
+@pytest.mark.asyncio
+async def test_mention_switch_applies_to_new_subscriptions(tmp_path: Path) -> None:
+    """关闭后新订阅的作者同样不再 @，重新开启后新订阅恢复。"""
+
+    store = SubscriptionStore(tmp_path)
+    target_key = make_target_key(target())
+    await store.add_target(
+        "douyin", "sec", "作者", target_key, target(), {}, subscriber_id="42"
+    )
+    await store.set_mention(target_key, False)
+
+    await store.add_target(
+        "bilibili", "2", "新作者", target_key, target(), {}, subscriber_id="42"
+    )
+    snapshot = await store.snapshot()
+    assert snapshot["bilibili:2"].targets[target_key].mention is False
+
+    await store.set_mention(target_key, True)
+    await store.add_target(
+        "bilibili", "3", "再一个", target_key, target(), {}, subscriber_id="42"
+    )
+    snapshot = await store.snapshot()
+    assert snapshot["bilibili:3"].targets[target_key].mention is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_mention_flag_seeds_new_subscriptions(tmp_path: Path) -> None:
+    """老数据没有会话级开关时，从已有关闭标记推导，避免新订阅又 @。"""
+
+    payload = {
+        "version": STORAGE_VERSION,
+        "subscriptions": [
+            {
+                "platform": "douyin",
+                "author_id": "sec",
+                "name": "作者",
+                "targets": [
+                    {
+                        "target": target(),
+                        "subscribers": ["42"],
+                        "mention": False,
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "subscriptions.json").write_text(json.dumps(payload), encoding="utf-8")
+    target_key = make_target_key(target())
+
+    store = SubscriptionStore(tmp_path)
+    await store.add_target(
+        "bilibili", "2", "新作者", target_key, target(), {}, subscriber_id="42"
+    )
+
+    snapshot = await store.snapshot()
+    assert snapshot["bilibili:2"].targets[target_key].mention is False
 
 
 @pytest.mark.asyncio
