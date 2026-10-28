@@ -67,7 +67,7 @@ async def test_douyin_media_messages_downloads_and_cleans_up(
         assert created["dir"].is_dir()
         caption = messages[0].extract_plain_text()
         assert caption.startswith(
-            f"抖音 · 呆呆丸 发布了新作品\n{media.SEPARATOR}\n标题\n\n00:07"
+            f"抖音 · 呆呆丸 更新了\n{media.SEPARATOR}\n标题\n\n时长 00:07"
         )
         assert "720×1280" in caption
         assert [segment.type for segment in messages[1]] == ["video"]
@@ -112,7 +112,8 @@ async def test_douyin_media_messages_sends_note_images(
         use_base64=False,
     )
     async with douyin_media.douyin_media_messages(make_work(url), settings) as messages:
-        assert messages[0].extract_plain_text().startswith("抖音 · 呆呆丸 发布了新作品")
+        caption = messages[0].extract_plain_text()
+        assert caption.startswith("抖音 · 呆呆丸 更新了")
         assert [segment.type for segment in messages[1]] == ["image", "image"]
 
     assert created["url"] == url

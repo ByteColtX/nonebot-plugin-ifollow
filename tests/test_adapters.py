@@ -39,7 +39,7 @@ def test_detect_recognises_both_platforms() -> None:
 
 
 def test_detect_rejects_unknown_input() -> None:
-    with pytest.raises(ValueError, match="抖音或 B 站"):
+    with pytest.raises(ValueError, match="抖音或 B站"):
         adapters.detect("随便一段文字")
 
 

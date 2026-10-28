@@ -5,7 +5,9 @@
 
 默认把媒体的本地路径交给协议端（``file://``），不读字节也不编码，事件循环没有负担。
 只有协议端与插件不在同一台机器（它读不到本地路径）时，才开启 ``base64`` 传输，
-把媒体编码成 base64 消息段发送。
+把媒体读成字节放进消息段的 ``raw``，由 alconna 导出层编码成 base64。
+不能自己拼 ``base64://`` 塞进 ``url``：``Media.__post_init__`` 会给没有 hostname 的
+``url`` 补 ``https://``，协议端就会把 base64 当网络地址去下载。
 
 视频类媒体在下载前会先探测远端体积，超过上限的直接不下载；探测失败或拿不到长度时，
 退回下载后的体积检查。
@@ -19,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from base64 import b64encode
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -197,10 +198,10 @@ def _detail_parts(bundle: MediaBundle) -> list[str]:
     parts: list[str] = []
     if bundle.count > 1:
         parts.append(
-            f"{bundle.count} 张" if not bundle.video_seconds else f"{bundle.count} 个"
+            f"{bundle.count} 个文件" if bundle.video_seconds else f"{bundle.count} 张图"
         )
     if bundle.video_seconds:
-        parts.append(_format_duration(bundle.video_seconds))
+        parts.append(f"时长 {_format_duration(bundle.video_seconds)}")
     if bundle.width and bundle.height:
         parts.append(f"{bundle.width}×{bundle.height}")
     if bundle.total_bytes:
@@ -217,7 +218,7 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         bundle: 下载后的媒体统计。
 
     Returns:
-        形如 ``平台 · 作者 发布了新作品`` + 分隔线 + 文案 + 参数行 + 发布时间的多行
+        形如 ``平台 · 作者 更新了`` + 分隔线 + 文案 + 参数行 + 发布时间的多行
         文案。
     """
 
@@ -226,7 +227,7 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         if meta.platform_name
         else meta.author_name
     )
-    lines = [f"{author} 发布了新作品", SEPARATOR]
+    lines = [f"{author} 更新了", SEPARATOR]
     text = _work_text(result)
     if text:
         lines.extend([text, ""])
@@ -235,12 +236,12 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         lines.append(" · ".join(details))
     if bundle.skipped:
         lines.append(
-            f"另有 {bundle.skipped} 个媒体超过 "
-            f"{bundle.max_bytes // 1024 // 1024}MB 未发送"
+            f"已跳过 {bundle.skipped} 个超过 "
+            f"{bundle.max_bytes // 1024 // 1024}MB 的文件"
         )
     if meta.create_time:
         stamp = datetime.fromtimestamp(meta.create_time).strftime("%Y-%m-%d %H:%M")
-        lines.append(stamp)
+        lines.append(f"{stamp} 发布")
     return "\n".join(lines)
 
 
@@ -383,7 +384,7 @@ async def _segments_for(path: Path, *, base64_media: bool) -> UniMessage:
 
     Args:
         path: 本地媒体文件。
-        base64_media: 是否编码成 base64；默认直接把路径交给协议端。
+        base64_media: 是否读成字节交给导出层编码；默认直接把路径交给协议端。
 
     Returns:
         图片或视频消息段。
@@ -391,15 +392,9 @@ async def _segments_for(path: Path, *, base64_media: bool) -> UniMessage:
 
     is_video = path.suffix.lower() in VIDEO_SUFFIXES
     if base64_media:
-        url = await asyncio.to_thread(_base64_url, path)
-        return UniMessage.video(url=url) if is_video else UniMessage.image(url=url)
+        raw = await asyncio.to_thread(path.read_bytes)
+        return UniMessage.video(raw=raw) if is_video else UniMessage.image(raw=raw)
     return UniMessage.video(path=path) if is_video else UniMessage.image(path=path)
-
-
-def _base64_url(path: Path) -> str:
-    """在线程里读文件并编码，避免大文件阻塞事件循环。"""
-
-    return f"base64://{b64encode(path.read_bytes()).decode()}"
 
 
 async def media_messages(

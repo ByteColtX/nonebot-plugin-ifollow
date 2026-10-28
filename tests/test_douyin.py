@@ -492,10 +492,10 @@ async def test_fetch_raises_when_empty_result_hides_failed_aid(client: Any) -> N
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_works_omits_count_and_stops_at_limit(
+async def test_fetch_latest_works_requests_full_page_and_stops_at_limit(
     client: Any,
 ) -> None:
-    """不再传分页条数；攒够补发上限后不再翻页。"""
+    """每页按固定条数拉取（否则图文几乎全漏），攒够补发上限后不再翻页。"""
 
     created = client(
         [
@@ -514,7 +514,10 @@ async def test_fetch_latest_works_omits_count_and_stops_at_limit(
 
     assert len(works) == 5
     assert len(created.requests) == 2
-    assert all("count=" not in str(request.url) for request in created.requests)
+    assert all(
+        request.url.params["count"] == str(douyin.POST_PAGE_SIZE)
+        for request in created.requests
+    )
 
 
 @pytest.mark.asyncio

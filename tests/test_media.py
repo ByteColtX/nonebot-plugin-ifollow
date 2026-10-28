@@ -43,12 +43,12 @@ def test_caption_renders_full_block() -> None:
     )
 
     assert media.caption(META, result, bundle) == (
-        "抖音 · 呆呆丸 发布了新作品\n"
+        "抖音 · 呆呆丸 更新了\n"
         f"{media.SEPARATOR}\n"
         "作品标题\n"
         "\n"
-        "00:07 · 720×1280 · 1.0 MB\n"
-        f"{stamp()}"
+        "时长 00:07 · 720×1280 · 1.0 MB\n"
+        f"{stamp()} 发布"
     )
 
 
@@ -67,7 +67,7 @@ def test_caption_counts_image_album() -> None:
 
     text = media.caption(META, result, bundle)
 
-    assert "9 张 · 1080×1440 · 2 KB" in text
+    assert "9 张图 · 1080×1440 · 2 KB" in text
 
 
 def test_caption_omits_empty_detail_line() -> None:
@@ -75,7 +75,7 @@ def test_caption_omits_empty_detail_line() -> None:
 
     text = media.caption(media.WorkMeta("作者", 0), result, media.MediaBundle())
 
-    assert text == f"作者 发布了新作品\n{media.SEPARATOR}"
+    assert text == f"作者 更新了\n{media.SEPARATOR}"
 
 
 def test_caption_reports_skipped_media_before_timestamp() -> None:
@@ -89,8 +89,8 @@ def test_caption_reports_skipped_media_before_timestamp() -> None:
 
     lines = media.caption(META, result, bundle).splitlines()
 
-    assert lines[-2] == "另有 2 个媒体超过 100MB 未发送"
-    assert lines[-1] == stamp()
+    assert lines[-2] == "已跳过 2 个超过 100MB 的文件"
+    assert lines[-1] == f"{stamp()} 发布"
 
 
 def test_caption_reports_skipped_media_without_detail_line() -> None:
@@ -99,7 +99,7 @@ def test_caption_reports_skipped_media_without_detail_line() -> None:
 
     lines = media.caption(media.WorkMeta("作者", 0), result, bundle).splitlines()
 
-    assert lines[-1] == "另有 1 个媒体超过 100MB 未发送"
+    assert lines[-1] == "已跳过 1 个超过 100MB 的文件"
 
 
 async def test_media_messages_sends_single_video(tmp_path: Path) -> None:
@@ -204,7 +204,7 @@ async def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
     assert (
         messages[0]
         .extract_plain_text()
-        .startswith(f"抖音 · 呆呆丸 发布了新作品\n{media.SEPARATOR}\n标题")
+        .startswith(f"抖音 · 呆呆丸 更新了\n{media.SEPARATOR}\n标题")
     )
     assert [segment.type for segment in messages[1]] == ["image"]
 
@@ -226,20 +226,25 @@ async def test_media_segments_use_local_path_by_default(tmp_path: Path) -> None:
     assert all(segment.url is None for segment in segments)
 
 
-async def test_media_segments_switch_to_base64_when_enabled(tmp_path: Path) -> None:
-    """跨主机部署时改用 base64 消息段。"""
+async def test_media_segments_switch_to_raw_bytes_when_enabled(tmp_path: Path) -> None:
+    """跨主机部署时交给导出层编码，不自己拼 base64:// 地址。"""
 
     video = write(tmp_path / "work", suffix=".mp4")
+    image = write(tmp_path / "img")
 
     bundle = await media.media_messages(
-        [make_file(video)], policy(base64_media=True), "抖音"
+        [make_file(video), make_file(image)], policy(base64_media=True), "抖音"
     )
 
-    (segment,) = list(bundle.messages[0])
-    assert segment.path is None
-    assert segment.raw is None
-    assert segment.url is not None
-    assert segment.url.startswith("base64://")
+    segments = [segment for message in bundle.messages for segment in message]
+    assert segments
+    assert all(segment.path is None for segment in segments)
+    assert all(segment.url is None for segment in segments)
+    assert all(segment.raw for segment in segments)
+    assert [segment.raw for segment in segments] == [
+        video.read_bytes(),
+        image.read_bytes(),
+    ]
 
 
 class FakeRef:
@@ -379,8 +384,8 @@ async def test_media_messages_for_skips_download_when_everything_is_too_big(
         temp_prefix="ifollow-test-",
     ) as messages:
         text = messages[0].extract_plain_text()
-        assert text.startswith("抖音 · 呆呆丸 发布了新作品")
-        assert "另有 1 个媒体超过 1MB 未发送" in text
+        assert text.startswith("抖音 · 呆呆丸 更新了")
+        assert "已跳过 1 个超过 1MB 的文件" in text
 
     assert media_at_download == [None]
 

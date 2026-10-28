@@ -57,13 +57,22 @@ def attempt_key(
 
 
 def media_for(
-    work: PlatformWork, settings: Settings
+    work: PlatformWork, settings: Settings, author_name: str = ""
 ) -> AbstractAsyncContextManager[list[UniMessage]]:
-    """按平台选择解析下载上下文。"""
+    """按平台选择解析下载上下文。
+
+    Args:
+        work: 待发送的作品。
+        settings: 运行期配置。
+        author_name: 作品未带作者名时的兜底，取订阅里记住的作者名。
+
+    Returns:
+        消息列表的异步上下文。
+    """
 
     if work.platform == "douyin":
-        return douyin_media_messages(work, settings)
-    return bilibili_media_messages(work, settings)
+        return douyin_media_messages(work, settings, author_name)
+    return bilibili_media_messages(work, settings, author_name)
 
 
 def sent_identities(
@@ -228,7 +237,7 @@ async def deliver_work(
         if not sendable:
             return
     try:
-        async with media_for(work, ctx.settings) as messages:
+        async with media_for(work, ctx.settings, author.author_name) as messages:
             for target_key in sendable:
                 target_state = author.targets[target_key]
                 try:

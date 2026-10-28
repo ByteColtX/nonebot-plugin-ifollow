@@ -93,7 +93,7 @@ def patch_media(
 
     @asynccontextmanager
     async def fake_media(
-        work: PlatformWork, _settings: Settings
+        work: PlatformWork, _settings: Settings, _author_name: str = ""
     ) -> AsyncIterator[list[FakeMessage]]:
         prepared.append(work.work_id)
         if (
@@ -594,14 +594,14 @@ async def test_media_for_selects_pipeline_by_platform(
 
     @asynccontextmanager
     async def douyin_pipeline(
-        _work: PlatformWork, _settings: Settings
+        _work: PlatformWork, _settings: Settings, _author_name: str = ""
     ) -> AsyncIterator[list[Any]]:
         calls.append("douyin")
         yield []
 
     @asynccontextmanager
     async def bilibili_pipeline(
-        _work: PlatformWork, _settings: Settings
+        _work: PlatformWork, _settings: Settings, _author_name: str = ""
     ) -> AsyncIterator[list[Any]]:
         calls.append("bilibili")
         yield []

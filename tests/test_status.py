@@ -72,8 +72,9 @@ def test_render_reports_never_run_and_healthy() -> None:
     author = AuthorSubscription("bilibili", "1", "作者")
     text = render_status(states={}, authors={author.key: author})
 
-    assert "上次轮询：尚未运行" in text
-    assert "所有作者状态正常。" in text
+    assert "爱播状态 · 正常" in text
+    assert "还没有轮询过" in text
+    assert "所有作者正常" in text
 
 
 def test_render_reports_round_stats_and_inflight() -> None:
@@ -87,10 +88,10 @@ def test_render_reports_round_stats_and_inflight() -> None:
         abandoned=[("标题", "作品已删除")],
     )
 
-    assert "上次轮询：1 分钟前" in text
-    assert "正在抓取：1 个作者" in text
-    assert "本轮：2 个新作品" in text
-    assert "最近放弃：标题（作品已删除）" in text
+    assert "上次轮询 1 分钟前" in text
+    assert "正在抓取 1 个作者" in text
+    assert "本轮新增 2 条" in text
+    assert "最近放弃 标题：作品已删除" in text
 
 
 def test_render_lists_failing_author() -> None:
@@ -100,7 +101,9 @@ def test_render_lists_failing_author() -> None:
     )
     text = render_status(states={author.key: state}, authors={author.key: author})
 
-    assert "连续失败 2 次（风控）" in text
+    assert "1 个作者异常" in text
+    assert "连续失败 2 次" in text
+    assert "风控，" in text
     assert "秒后重试" in text
 
 
@@ -109,7 +112,8 @@ def test_render_lists_disabled_author() -> None:
     state = AuthorPollState(disabled=True, last_error="作者已注销")
     text = render_status(states={author.key: state}, authors={author.key: author})
 
-    assert "已停用（作者已注销）" in text
+    assert "已停用" in text
+    assert "原因：作者已注销" in text
 
 
 def test_poller_status_text_uses_round_stats() -> None:
@@ -119,7 +123,7 @@ def test_poller_status_text_uses_round_stats() -> None:
 
     text = poller.status_text({})
 
-    assert "作者周期 1800 秒" in text
+    assert "作者每 1800 秒轮询一次" in text
 
 
 def test_cursor_order_is_total() -> None:

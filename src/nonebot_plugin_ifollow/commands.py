@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from nonebot import get_driver, logger, on_command
 from nonebot.adapters import Bot, Event, Message
 from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
-from nonebot_plugin_alconna.uniseg import get_target
+from nonebot_plugin_alconna.uniseg import Target, get_target
 
 from . import formatting, reply
 from .adapters import detect
@@ -84,27 +85,24 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     context = runtime()
     value = args.extract_plain_text().strip() or await reply.replied_text(event, bot)
     if not value:
-        await UniMessage(
-            f"用法：{command_text(SUBSCRIBE_COMMAND, '<作者主页或作品链接>')}，"
-            "也可引用含链接的消息后发送。"
-        ).finish()
+        usage = command_text(SUBSCRIBE_COMMAND, "<作者主页、作品链接或作者 ID>")
+        await UniMessage(f"用法：{usage}\n也可以引用带链接的消息再发这条命令").finish()
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
     subscriber_id = event.get_user_id()
+    usage = command_text(SUBSCRIBE_COMMAND, "<作者主页、作品链接或作者 ID>")
     try:
         adapter = detect(value)
     except ValueError as exc:
-        report = formatting.describe_failure(exc)
-        logger.warning(
-            f"{SUBSCRIBE_COMMAND}解析失败 code={report.code} value={value!r}"
-        )
+        report = formatting.describe_failure(exc, value=value, usage=usage)
+        logger.warning(f"{SUBSCRIBE_COMMAND}解析失败 value={value!r}：{exc}")
         await UniMessage(formatting.render_failure("订阅", report)).finish()
     try:
         resolved = await adapter.resolve(context.settings, value)
     except Exception as exc:
-        report = formatting.describe_failure(exc, platform=adapter.platform)
+        report = formatting.describe_failure(exc, value=value, usage=usage)
         logger.opt(exception=True).warning(
-            f"{SUBSCRIBE_COMMAND}解析失败 code={report.code} value={value!r}"
+            f"{SUBSCRIBE_COMMAND}解析失败 value={value!r}：{exc}"
         )
         await UniMessage(formatting.render_failure("订阅", report)).finish()
 
@@ -128,13 +126,11 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
             adapter.platform, author.name or existing.author_name
         )
         if joined:
-            await UniMessage(f"已为 {label} 开启更新提醒。").send(
+            await UniMessage(f"你已经订阅了 {label}，已把你加为订阅人").send(
                 target=target, bot=bot
             )
             return
-        await UniMessage(f"本会话已订阅 {label}，无需重复。").send(
-            target=target, bot=bot
-        )
+        await UniMessage(f"你已经订阅了 {label}").send(target=target, bot=bot)
         return
 
     cursors = {
@@ -161,14 +157,12 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
             )
     label = formatting.author_label(adapter.platform, author.name)
     if not added:
-        await UniMessage(f"本会话已订阅 {label}，无需重复。").send(
-            target=target, bot=bot
-        )
+        await UniMessage(f"你已经订阅了 {label}").send(target=target, bot=bot)
         return
     await UniMessage(
         f"已订阅 {label}\n"
-        "首次订阅不补发历史内容，有新作品会自动发送。\n"
-        f"发送 {command_text(LIST_COMMAND)} 查看当前订阅。"
+        "有新作品会自动推给你\n"
+        f"发送 {command_text(LIST_COMMAND)} 查看全部订阅"
     ).send(target=target, bot=bot)
 
 
@@ -191,7 +185,8 @@ def can_manage(event: Event) -> bool:
     return getattr(sender, "role", None) in ("owner", "admin")
 
 
-_NOTICE_SUFFIX = " 发布了新作品"
+_NOTICE_SUFFIXES = (" 更新了", " 发布了新作品")
+"""通知首行后缀；旧卡片仍按旧后缀认，历史消息还能引用退订。"""
 
 
 def _reply_text(reply: Any) -> str:
@@ -215,8 +210,8 @@ def _reply_text(reply: Any) -> str:
 def quoted_author(reply: Any) -> tuple[str, str] | None:
     """从引用的爱播通知里认出作者。
 
-    通知首行形如 ``抖音 · 作者 发布了新作品``；逐行找这个后缀，所以正文里
-    出现同样的字样也不会认错。
+    通知首行形如 ``抖音 · 作者 更新了``；逐行找后缀，所以正文里出现同样的字样
+    也不会认错。旧卡片的 ``发布了新作品`` 仍然认。
 
     Args:
         reply: 被引用的消息。
@@ -229,14 +224,121 @@ def quoted_author(reply: Any) -> tuple[str, str] | None:
     text = _reply_text(reply)
     for line in text.splitlines():
         line = line.strip()
-        if not line.endswith(_NOTICE_SUFFIX):
+        suffix = next((item for item in _NOTICE_SUFFIXES if line.endswith(item)), None)
+        if suffix is None:
             continue
-        head = line[: -len(_NOTICE_SUFFIX)].strip()
+        head = line[: -len(suffix)].strip()
         if not head:
             continue
         platform_label, sep, name = head.partition(" · ")
         return (platform_label, name) if sep and name else ("", head)
     return None
+
+
+_INDEX_SEPARATORS = re.compile(r"[\s,，、]+")
+
+
+def parse_indexes(value: str) -> list[int] | None:
+    """解析「1 3」「1,2」「1、2」这类序号列表。
+
+    Args:
+        value: 用户输入。
+
+    Returns:
+        去重后的序号；不是纯序号时返回 ``None``。
+    """
+
+    tokens = [token for token in _INDEX_SEPARATORS.split(value.strip()) if token]
+    if not tokens or not all(token.isdecimal() for token in tokens):
+        return None
+    indexes: list[int] = []
+    for token in tokens:
+        index = int(token)
+        if index not in indexes:
+            indexes.append(index)
+    return indexes
+
+
+def _invalid_index_message(indexes: list[int], total: int) -> str:
+    """生成越界序号的提示，支持一次列出多个。"""
+
+    joined = "、".join(str(index) for index in indexes)
+    hint = "只能输入 1" if total == 1 else f"输入 1-{total}"
+    return f"没有第 {joined} 个订阅；当前共 {total} 个，{hint}"
+
+
+def _batch_unsubscribe_text(
+    whole: list[AuthorSubscription],
+    partial: list[AuthorSubscription],
+    denied: list[AuthorSubscription],
+) -> str:
+    """拼出批量退订结果：按结果分组，每组先计数再列作者。"""
+
+    def labels(authors: list[AuthorSubscription]) -> list[str]:
+        return [
+            formatting.author_label(author.platform, author.author_name)
+            for author in authors
+        ]
+
+    sections: list[list[str]] = []
+    if whole:
+        sections.append([f"已退订 {len(whole)} 个订阅", *labels(whole)])
+    if partial:
+        sections.append(
+            [
+                f"已关闭 {len(partial)} 个订阅的 @ 提醒，其他订阅人仍会收到推送",
+                *labels(partial),
+            ]
+        )
+    if denied:
+        sections.append(
+            [
+                f"有 {len(denied)} 个不是你订阅的；只有订阅人、群主、群管理和"
+                "机器人超级用户能退订",
+                *labels(denied),
+            ]
+        )
+    return "\n\n".join("\n".join(section) for section in sections)
+
+
+async def _unsubscribe_many(
+    context: Runtime,
+    items: list[AuthorSubscription],
+    indexes: list[int],
+    event: Event,
+    target: Target,
+    bot: Bot,
+) -> None:
+    """按序号批量退订，结果合并成一条消息。"""
+
+    invalid = [index for index in indexes if not 1 <= index <= len(items)]
+    if invalid:
+        await UniMessage(_invalid_index_message(invalid, len(items))).finish()
+    target_key = make_target_key(target.dump())
+    user_id = event.get_user_id()
+    force = can_manage(event)
+    whole: list[AuthorSubscription] = []
+    partial: list[AuthorSubscription] = []
+    denied: list[AuthorSubscription] = []
+    async with context.store.transaction():
+        for index in indexes:
+            author = items[index - 1]
+            removed, target_removed = await context.store.remove_subscriber(
+                author.platform,
+                author.author_id,
+                target_key,
+                user_id,
+                force=force,
+            )
+            if removed and target_removed:
+                whole.append(author)
+            elif removed:
+                partial.append(author)
+            else:
+                denied.append(author)
+    await UniMessage(_batch_unsubscribe_text(whole, partial, denied)).send(
+        target=target, bot=bot
+    )
 
 
 @UNSUBSCRIBE.handle()
@@ -256,7 +358,8 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
         usage = command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>")
         await UniMessage(
             f"用法：{usage}\n"
-            f"也可以引用一条爱播通知后直接发 {command_text(UNSUBSCRIBE_COMMAND)}。"
+            "序号可以一次写多个，例如 1 3 5\n"
+            f"也可以引用一条推送再发 {command_text(UNSUBSCRIBE_COMMAND)}"
         ).finish()
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
@@ -273,13 +376,19 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
             and (not platform_label or platform_name(author.platform) == platform_label)
         ]
         if len(matched) != 1:
-            await UniMessage(f"「{name}」当前没有订阅，可能已经退订过了。").finish()
+            await UniMessage(f"{name} 不在本会话的订阅列表里，可能已经退订过").finish()
         platform, author_id, author_name = (
             matched[0].platform,
             matched[0].author_id,
             matched[0].author_name,
         )
     else:
+        indexes = parse_indexes(value)
+        if indexes is not None:
+            if len(indexes) > 1:
+                await _unsubscribe_many(context, items, indexes, event, target, bot)
+                return
+            value = str(indexes[0])
         platform, author_id, author_name = await _resolve_target(context, items, value)
     label = formatting.author_label(platform, author_name)
     force = can_manage(event)
@@ -288,14 +397,14 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
             platform, author_id, target_key, event.get_user_id(), force=force
         )
     if removed and target_removed:
-        await UniMessage(f"已退订 {label}。").send(target=target, bot=bot)
+        await UniMessage(f"已退订 {label}").send(target=target, bot=bot)
     elif removed:
-        await UniMessage(f"已退订你在 {label} 的提醒，其他订阅人仍会收到通知。").send(
+        await UniMessage(f"已关闭你在 {label} 的 @ 提醒；其他订阅人仍会收到推送").send(
             target=target, bot=bot
         )
     else:
         await UniMessage(
-            f"「{label}」不是你订阅的，只有订阅人、群管理或机器人管理员可以退订。"
+            f"你没有订阅 {label}；只有订阅人、群主、群管理和机器人超级用户能退订"
         ).send(target=target, bot=bot)
 
 
@@ -325,15 +434,12 @@ def _notify_status(items: list[AuthorSubscription], target_key: str) -> str:
     total = len(items)
     off = sum(1 for author in items if not author.targets[target_key].mention)
     if off == 0:
-        state = "已开启"
+        state = f"@ 提醒已开启（本会话 {total} 个订阅）"
     elif off == total:
-        state = "已关闭"
+        state = f"@ 提醒已关闭（本会话 {total} 个订阅）"
     else:
-        state = f"{off}/{total} 个订阅已关闭"
-    return (
-        f"{NOTIFY_COMMAND}：本会话 @ 提醒{state}（共 {total} 个订阅）\n"
-        f"设置：{command_text(NOTIFY_COMMAND, '开|关')}。"
-    )
+        state = f"@ 提醒有 {off}/{total} 个订阅已关闭"
+    return f"{state}\n修改：{command_text(NOTIFY_COMMAND, '开|关')}"
 
 
 @NOTIFY.handle()
@@ -367,18 +473,18 @@ async def notify_command(event: Event, bot: Bot, args: Message = CommandArg()) -
             user_id in author.targets[target_key].subscriber_ids for author in items
         )
         if not subscribed:
-            await UniMessage("只有本会话的订阅人可以设置 @ 提醒。").finish()
+            await UniMessage("只有订阅人能修改 @ 提醒").finish()
     elif not private and not manage:
-        await UniMessage("只有群主、群管理员或机器人超级用户可以设置 @ 提醒。").finish()
+        await UniMessage("只有群主、群管理和机器人超级用户能修改 @ 提醒").finish()
     async with context.store.transaction():
         changed = await context.store.set_mention(target_key, switch)
-    state = "开启" if switch else "关闭"
     if changed:
-        text = f"已{state}本会话 {len(items)} 个订阅的 @ 提醒。"
-        if not switch:
-            text += "新作品仍会发送。"
+        if switch:
+            text = "已开启 @ 提醒，新作品发布时会 @ 本会话的订阅人"
+        else:
+            text = "已关闭 @ 提醒，新作品仍会正常推送"
     else:
-        text = f"本会话的 @ 提醒已经是{state}状态。"
+        text = "@ 提醒本来就开着" if switch else "@ 提醒本来就关着"
     await UniMessage(text).send(target=target, bot=bot)
 
 
@@ -400,9 +506,7 @@ async def status_command(event: Event, bot: Bot) -> None:
     """显示轮询健康度，仅超级用户可用。"""
 
     if event.get_user_id() not in get_driver().config.superusers:
-        await UniMessage(
-            f"仅超级用户可以使用 {command_text(STATUS_COMMAND)}。"
-        ).finish()
+        await UniMessage(f"{command_text(STATUS_COMMAND)} 只对超级用户开放").finish()
     context = runtime()
     authors = await context.store.snapshot()
     await UniMessage(context.poller.status_text(authors)).send(
@@ -418,26 +522,25 @@ async def _resolve_target(
     if value.isdecimal():
         index = int(value)
         if not 1 <= index <= len(items):
-            await UniMessage(
-                f"序号无效：当前共 {len(items)} 个订阅，请输入 1-{len(items)}。"
-            ).finish()
+            await UniMessage(_invalid_index_message([index], len(items))).finish()
         selected = items[index - 1]
         return selected.platform, selected.author_id, selected.author_name
     matched = match_subscription(items, value)
     if matched is not None:
         return matched.platform, matched.author_id, matched.author_name
+    usage = command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>")
     try:
         adapter = detect(value)
     except ValueError as exc:
-        report = formatting.describe_failure(exc)
-        logger.warning(f"{UNSUBSCRIBE_COMMAND}失败 code={report.code} value={value!r}")
+        report = formatting.describe_failure(exc, value=value, usage=usage)
+        logger.warning(f"{UNSUBSCRIBE_COMMAND}失败 value={value!r}：{exc}")
         await UniMessage(formatting.render_failure("退订", report)).finish()
     try:
         resolved = await adapter.resolve(context.settings, value)
     except Exception as exc:
-        report = formatting.describe_failure(exc, platform=adapter.platform)
+        report = formatting.describe_failure(exc, value=value, usage=usage)
         logger.opt(exception=True).warning(
-            f"{UNSUBSCRIBE_COMMAND}失败 code={report.code} value={value!r}"
+            f"{UNSUBSCRIBE_COMMAND}失败 value={value!r}：{exc}"
         )
         await UniMessage(formatting.render_failure("退订", report)).finish()
     author = resolved.author

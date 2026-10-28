@@ -6,9 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-import httpx
-
-from .errors import PermanentError, TransientError
+from .errors import PermanentError
 from .models import AuthorSubscription
 from .platforms import Platform
 from .status import platform_name
@@ -25,21 +23,20 @@ from .style import (
 
 
 def help_message() -> str:
-    """生成帮助正文；正文里只写命令名，不带前缀。"""
+    """生成帮助正文；紧凑一行一条，不带命令前缀。"""
 
     return (
         f"{HELP_COMMAND}\n"
         f"{SEPARATOR}\n"
-        f"· {SUBSCRIBE_COMMAND} <作者主页、作品链接或作者 ID>\n"
+        f"· {SUBSCRIBE_COMMAND} <主页、作品链接或作者 ID；"
+        "也可引用带链接的消息>\n"
         f"· {LIST_COMMAND}\n"
-        f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接>\n"
-        "  （只能退自己的；群管理、群主和机器人管理员可退本群任何订阅）\n"
+        f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接；序号可一次多个>\n"
         f"· {NOTIFY_COMMAND} 开|关\n"
-        "  （群管理 / 群主 / 机器人管理员，私聊订阅人；只影响新作品里的 @）\n"
-        f"· {STATUS_COMMAND}（仅超级用户）\n"
+        f"· {STATUS_COMMAND}\n"
         f"{SEPARATOR}\n"
-        f"引用含链接的消息后发送 {SUBSCRIBE_COMMAND} 也能订阅。\n"
-        "支持抖音与 B 站，首次订阅不补发历史内容。"
+        "退订只能退自己的，群主、群管理和机器人超级用户可以退任意订阅\n"
+        "支持平台：抖音、B站"
     )
 
 
@@ -49,11 +46,13 @@ def usage() -> str:
     return "\n".join(
         (
             command_text(HELP_COMMAND),
-            command_text(SUBSCRIBE_COMMAND, "<作者主页或作品链接>"),
+            command_text(SUBSCRIBE_COMMAND, "<作者主页、作品链接或作者 ID>"),
             command_text(LIST_COMMAND),
-            command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>"),
+            command_text(
+                UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接；序号可一次多个>"
+            ),
             command_text(NOTIFY_COMMAND, "开|关"),
-            f"{command_text(STATUS_COMMAND)}（超级用户）",
+            f"{command_text(STATUS_COMMAND)}（仅超级用户）",
         )
     )
 
@@ -62,23 +61,22 @@ def empty_subscription_message() -> str:
     """当前会话没有订阅时的统一提示。"""
 
     return (
-        "当前会话没有爱播订阅。\n"
-        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页链接>')} 开始订阅。"
+        "本会话还没有订阅\n"
+        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页、作品链接或作者 ID>')}"
+        " 开始订阅"
     )
 
 
-_PLATFORM_CODES = {"douyin": "DY", "bilibili": "BILI"}
-
-_RISK_HINTS = ("风控", "拦截", "blocked", "403", "412", "429", "-352", "-799", "-509")
 _GONE_HINTS = ("不存在", "已注销", "已删除", "404", "410", "62002")
+RAW_ERROR_LIMIT = 200
+"""原始错误在消息里的最大长度，超长接口响应会截断。"""
 
 
 @dataclass(frozen=True, slots=True)
 class FailureReport:
-    """面向用户的失败说明，附带可供运维检索的错误码。"""
+    """面向用户的失败说明：原始错误 + 一句他能做的事。"""
 
-    code: str
-    reason: str
+    detail: str
     hint: str
 
 
@@ -88,53 +86,42 @@ def author_label(platform: str, name: str) -> str:
     return f"{platform_name(platform)} · {name}"
 
 
-def describe_failure(
-    exc: BaseException, *, platform: str | None = None
-) -> FailureReport:
-    """把异常翻译成「人话 + 建议 + 错误码」，细节只留在日志里。"""
+def _raw_error(exc: BaseException) -> str:
+    """把异常压成一行可读文本；空消息退回异常类名。"""
 
-    code = _PLATFORM_CODES.get(platform or "", "")
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    if len(text) > RAW_ERROR_LIMIT:
+        return f"{text[:RAW_ERROR_LIMIT]}…"
+    return text
+
+
+def describe_failure(
+    exc: BaseException, *, value: str = "", usage: str = ""
+) -> FailureReport:
+    """把异常整理成「原始错误 + 用户能做的一步」。
+
+    Args:
+        exc: 捕获到的异常。
+        value: 用户这次输入的原文，链接认不出时回显给他看。
+        usage: 输入类失败时提示的完整命令文本。
+
+    Returns:
+        失败说明；只含用户能执行的动作，不含配置与日志细节。
+    """
+
     text = str(exc).lower()
     if isinstance(exc, ValueError):
-        return FailureReport(
-            _code(code, "INPUT"),
-            "没能识别这个链接",
-            "请发送作者主页链接、作品链接，或直接发作者 ID。",
-        )
+        detail = f"没能识别 {value}" if value else "没能识别这个链接"
+        return FailureReport(detail, f"发送 {usage}" if usage else "请重试")
     if isinstance(exc, PermanentError) or any(k in text for k in _GONE_HINTS):
-        return FailureReport(
-            _code(code, "GONE"),
-            "作者不存在或已注销",
-            "请确认链接是否指向仍在更新的作者。",
-        )
-    if any(k in text for k in _RISK_HINTS):
-        return FailureReport(
-            _code(code, "RISK"),
-            "平台暂时拦截了请求",
-            "请稍后重试；多次失败可以在 .env 里配置对应平台的 Cookie。",
-        )
-    if isinstance(exc, (TransientError, httpx.HTTPError)):
-        return FailureReport(
-            _code(code, "NET"),
-            "暂时连不上平台",
-            "请稍后重试。",
-        )
-    return FailureReport(
-        _code(code, "UNKNOWN"),
-        "遇到未预期的问题",
-        "请稍后重试；如果一直失败，请把下面的错误码发出来。",
-    )
-
-
-def _code(platform_code: str, category: str) -> str:
-    parts = [part for part in (platform_code, category) if part]
-    return "E-" + "-".join(parts)
+        return FailureReport(_raw_error(exc), "确认一下链接还能不能打开")
+    return FailureReport(_raw_error(exc), "稍后再试")
 
 
 def render_failure(action: str, report: FailureReport) -> str:
-    """生成 ``订阅失败：…`` 这类消息；只有人话、建议与错误码，没有堆栈。"""
+    """生成 ``无法订阅`` 这类提示：结论、原始错误、下一步。"""
 
-    return f"{action}失败：{report.reason}\n{report.hint}\n错误码 {report.code}"
+    return f"无法{action}\n{report.detail}\n{report.hint}"
 
 
 PLATFORM_ORDER: tuple[Platform, ...] = ("douyin", "bilibili")
@@ -169,7 +156,7 @@ def format_handle(author: AuthorSubscription) -> str:
         return ""
     if author.platform == "douyin":
         return f"@{author.author_handle}"
-    return f"UID:{author.author_handle}"
+    return f"UID {author.author_handle}"
 
 
 def format_relative_time(timestamp: int, *, now: float | None = None) -> str:
@@ -211,7 +198,9 @@ def subscription_list(
             current_platform = author.platform
             lines.append(platform_name(author.platform))
         lines.append(f"{index}. {_describe(author, now=now)}")
-    lines.extend(["", f"退订：{command_text(UNSUBSCRIBE_COMMAND, '<序号>')}"])
+    lines.extend(
+        ["", f"退订：{command_text(UNSUBSCRIBE_COMMAND, '<序号，可一次多个>')}"]
+    )
     return "\n".join(lines)
 
 
@@ -222,7 +211,9 @@ def _describe(author: AuthorSubscription, *, now: float | None) -> str:
     if handle := format_handle(author):
         parts.append(handle)
     updated = format_relative_time(author.last_update_time, now=now)
-    return f"{' '.join(parts)} · {updated}"
+    if updated == "未知":
+        return " ".join(parts)
+    return f"{' '.join(parts)} · {updated}更新"
 
 
 __all__ = [
