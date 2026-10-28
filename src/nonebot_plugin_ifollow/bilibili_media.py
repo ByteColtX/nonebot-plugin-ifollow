@@ -19,7 +19,7 @@ from .style import platform_name
 
 @asynccontextmanager
 async def bilibili_media_messages(
-    work: PlatformWork, settings: Settings
+    work: PlatformWork, settings: Settings, author_name: str = ""
 ) -> AsyncIterator[list[UniMessage]]:
     """解析并下载一个 B 站视频或动态，产出待发送的消息列表。
 
@@ -28,13 +28,14 @@ async def bilibili_media_messages(
     Args:
         work: 待发送的 B 站作品。
         settings: 运行期配置。
+        author_name: 作品未带作者名时的兜底，取订阅里记住的作者名。
 
     Yields:
         消息列表，第一条是文案，其后是媒体。
     """
 
     meta = WorkMeta(
-        author_name=work.author.name or work.author.author_id,
+        author_name=work.author.name or author_name or work.author.author_id,
         create_time=work.create_time,
         duration_unit="s",
         platform_name=platform_name("bilibili"),

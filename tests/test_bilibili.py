@@ -364,19 +364,179 @@ async def test_fetch_video_works_falls_back_to_web(
     assert works[0].author.author_id == "123"
 
 
-def test_parse_app_video_item_strips_joint_creation_suffix() -> None:
-    work = bili._parse_app_video_item(
+def test_parse_app_video_item_marks_joint_creation_author() -> None:
+    """联合创作的 author 是合作方，不能当作空间主人名字。"""
+
+    joint = bili._parse_app_video_item(
         {
             "bvid": "BV1AbcdefG12",
             "title": "联合投稿",
             "ctime": 1,
-            "author": "合作作者 等联合创作",
+            "author": "哔哩哔哩纪录片 等联合创作",
+            "is_cooperation": True,
         },
         "123",
     )
 
-    assert work is not None
-    assert work.author.name == "合作作者"
+    assert joint is not None
+    assert joint.author.name == ""
+    assert joint.author.author_id == "123"
+
+    normal = bili._parse_app_video_item(
+        {"bvid": "BV1AbcdefG13", "title": "普通投稿", "ctime": 2, "author": "作者"},
+        "123",
+    )
+
+    assert normal is not None
+    assert normal.author.name == "作者"
+
+
+@pytest.mark.asyncio
+async def test_fetch_video_app_names_joint_creation_with_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """联合创作稿件用作者资料的昵称，不用合作方名字。"""
+
+    use_app_responses(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "item": [
+                    {
+                        "bvid": "BV1joint",
+                        "title": "联合投稿",
+                        "ctime": 300,
+                        "author": "哔哩哔哩纪录片 等联合创作",
+                        "is_cooperation": True,
+                        "param": "300",
+                    },
+                    {
+                        "bvid": "BV1normal",
+                        "title": "普通投稿",
+                        "ctime": 200,
+                        "author": "三角洲行动",
+                        "param": "200",
+                    },
+                ],
+                "has_next": False,
+            },
+        },
+    )
+    calls: list[str] = []
+
+    async def fake_profile(_settings: Settings, mid: str) -> bili.AuthorInfo:
+        calls.append(mid)
+        return bili.AuthorInfo(mid, "三角洲行动", mid)
+
+    monkeypatch.setattr(bili, "fetch_author_profile", fake_profile)
+
+    works = await bili.fetch(SETTINGS, "3494376565115651", "video", None)
+
+    assert [work.author.name for work in works] == ["三角洲行动", "三角洲行动"]
+    assert [work.author.author_id for work in works] == ["3494376565115651"] * 2
+    assert calls == ["3494376565115651"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_video_app_keeps_name_empty_when_profile_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """资料接口失败时宁可留空，等投递层保留订阅里已有的名字。"""
+
+    use_app_responses(
+        monkeypatch,
+        {
+            "code": 0,
+            "data": {
+                "item": [
+                    {
+                        "bvid": "BV1joint",
+                        "ctime": 300,
+                        "author": "哔哩哔哩纪录片 等联合创作",
+                        "is_cooperation": True,
+                        "param": "300",
+                    }
+                ],
+                "has_next": False,
+            },
+        },
+    )
+
+    async def fail_profile(_settings: Settings, _mid: str) -> bili.AuthorInfo:
+        raise TransientError("boom")
+
+    monkeypatch.setattr(bili, "fetch_author_profile", fail_profile)
+
+    works = await bili.fetch(SETTINGS, "3494376565115651", "video", None)
+
+    assert works[0].author.name == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_video_web_names_collaborator_upper_with_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """网页接口的 upper 是合作方时，改用作者资料署名。"""
+
+    use_app_responses(monkeypatch, {"code": -400, "message": "请求错误"})
+    FakeUser.pages = [
+        {
+            "media_list": [
+                {
+                    "id": 100,
+                    "bv_id": "BV1joint",
+                    "title": "联合投稿",
+                    "pubtime": 300,
+                    "upper": {"mid": 999, "name": "哔哩哔哩纪录片", "face": "face"},
+                }
+            ],
+            "has_more": False,
+        }
+    ]
+    monkeypatch.setattr(bili, "User", FakeUser)
+
+    async def fake_profile(_settings: Settings, mid: str) -> bili.AuthorInfo:
+        return bili.AuthorInfo(mid, "三角洲行动", mid)
+
+    monkeypatch.setattr(bili, "fetch_author_profile", fake_profile)
+
+    works = await bili.fetch(SETTINGS, "3494376565115651", "video", None)
+
+    assert works[0].author.name == "三角洲行动"
+    assert works[0].author.author_id == "3494376565115651"
+
+
+@pytest.mark.asyncio
+async def test_resolve_author_uses_profile_name_not_latest_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """最新作品是联合创作时，订阅名仍取作者资料。"""
+
+    async def fake_profile(_settings: Settings, mid: str) -> bili.AuthorInfo:
+        return bili.AuthorInfo(mid, "三角洲行动", mid)
+
+    async def fake_fetch(
+        _settings: Settings, mid: str, _feed: str, _cursor: Cursor | None
+    ) -> list[bili.PlatformWork]:
+        return [
+            bili.PlatformWork(
+                platform="bilibili",
+                work_id="BV1joint",
+                url="https://www.bilibili.com/video/BV1joint",
+                title="联合投稿",
+                description="",
+                create_time=300,
+                author=bili.AuthorInfo(mid, "哔哩哔哩纪录片", mid),
+            )
+        ]
+
+    monkeypatch.setattr(bili, "fetch_author_profile", fake_profile)
+    monkeypatch.setattr(bili, "fetch", fake_fetch)
+
+    resolved = await bili.resolve_author(SETTINGS, "3494376565115651")
+
+    assert resolved.author.name == "三角洲行动"
 
 
 def test_parse_app_video_item_ignores_invalid_items() -> None:

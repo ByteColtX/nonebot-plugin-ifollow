@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -128,12 +129,8 @@ async def resolve_author(settings: Settings, value: str) -> ResolvedAuthor:
             feeds["dynamic"] = await fetch(settings, mid, "dynamic", None)
         except TransientError as exc:
             logger.warning(f"B 站动态首页拉取失败，订阅时跳过动态：{exc}")
-    latest = max(
-        (work for works in feeds.values() for work in works),
-        key=lambda work: work.order,
-        default=None,
-    )
-    return ResolvedAuthor(latest.author if latest else author, feeds)
+    # 订阅名只能取作者资料：最新作品的作者字段在联合创作时是合作方。
+    return ResolvedAuthor(author, feeds)
 
 
 # PlatformAdapter 协议里的名字是 resolve；commands.py 调的就是 adapter.resolve()。
@@ -233,6 +230,40 @@ async def _fetch_author_profile_web(settings: Settings, mid: str) -> AuthorInfo:
     )
 
 
+def _is_joint_creation_item(item: Any) -> bool:
+    """判断 APP 投稿条目是否联合创作；此时 ``author`` 是合作方而不是空间主人。"""
+
+    if not isinstance(item, dict):
+        return False
+    if item.get("is_cooperation"):
+        return True
+    return str(item.get("author") or "").endswith(JOINT_CREATION_SUFFIX)
+
+
+def _is_collaborator_item(item: Any, mid: str) -> bool:
+    """判断网页投稿条目的 ``upper`` 是否只是合作方。
+
+    网页接口没有 ``is_cooperation`` 标记，只能看 ``upper.mid`` 是否等于空间主人；
+    联合创作时 ``upper`` 是合作方，署它的名字会把订阅名改错。
+    """
+
+    upper = item.get("upper") if isinstance(item, dict) else None
+    if not isinstance(upper, dict):
+        return False
+    upper_mid = upper.get("mid")
+    return bool(upper_mid) and str(upper_mid) != mid
+
+
+async def _owner_identity(settings: Settings, mid: str) -> AuthorInfo | None:
+    """取空间主人资料，给联合创作稿件署名；失败时返回 ``None`` 交给订阅名兜底。"""
+
+    try:
+        return await fetch_author_profile(settings, mid)
+    except TransientError as exc:
+        logger.debug(f"B 站作者资料获取失败，联合创作暂不署名：{exc}")
+        return None
+
+
 async def fetch(
     settings: Settings,
     author_id: str,
@@ -267,9 +298,12 @@ async def _fetch_video_app(
 ) -> list[PlatformWork]:
     """通过 APP 接口读取视频投稿。"""
 
+    owner: AuthorInfo | None = None
+
     async with _app_client() as client:
 
         async def fetch_page(token: str | None) -> Page:
+            nonlocal owner
             params = {"vmid": mid, "order": "pubdate"}
             if token:
                 params["aid"] = token
@@ -277,11 +311,23 @@ async def _fetch_video_app(
             items = data.get("item") or []
             if not isinstance(items, list):
                 raise TransientError("B 站 APP 投稿列表缺少 item")
-            works = [
-                work
-                for item in items
-                if (work := _parse_app_video_item(item, mid)) is not None
-            ]
+            works: list[PlatformWork] = []
+            joint_ids: set[int] = set()
+            for item in items:
+                work = _parse_app_video_item(item, mid)
+                if work is None:
+                    continue
+                if _is_joint_creation_item(item):
+                    joint_ids.add(id(work))
+                works.append(work)
+            if joint_ids:
+                if owner is None:
+                    owner = await _owner_identity(settings, mid)
+                if owner is not None:
+                    works = [
+                        replace(work, author=owner) if id(work) in joint_ids else work
+                        for work in works
+                    ]
             last_item = items[-1] if items and isinstance(items[-1], dict) else {}
             last_aid = last_item.get("param")
             return Page(
@@ -319,6 +365,8 @@ async def _fetch_video_web(
             raise TransientError("B 站投稿列表缺少 media_list")
         works: list[PlatformWork] = []
         for item in items:
+            if author is None and _is_collaborator_item(item, mid):
+                author = await _owner_identity(settings, mid)
             work = _parse_video_item(item, mid, author)
             if work is None:
                 continue
@@ -436,8 +484,10 @@ def _parse_app_video_item(item: Any, mid: str) -> PlatformWork | None:
     if not bvid:
         return None
     name = str(item.get("author") or "")
-    if name.endswith(JOINT_CREATION_SUFFIX):
-        name = name[: -len(JOINT_CREATION_SUFFIX)]
+    if item.get("is_cooperation") or name.endswith(JOINT_CREATION_SUFFIX):
+        # 联合创作时 author 是合作方（如「哔哩哔哩纪录片 等联合创作」），不是空间主人；
+        # 留空由 _fetch_video_app 用作者资料补上，绝不能拿合作方名字当订阅名。
+        name = ""
     return PlatformWork(
         platform="bilibili",
         work_id=bvid,
@@ -461,11 +511,11 @@ def _parse_video_item(
     if not bvid:
         return None
     item_author = item.get("upper")
-    if isinstance(item_author, dict):
+    if isinstance(item_author, dict) and not _is_collaborator_item(item, mid):
         author = AuthorInfo(
-            author_id=str(item_author.get("mid") or mid),
+            author_id=mid,
             name=str(item_author.get("name") or mid),
-            handle=str(item_author.get("mid") or mid),
+            handle=mid,
             avatar=str(item_author.get("face") or ""),
         )
     if author is None:
