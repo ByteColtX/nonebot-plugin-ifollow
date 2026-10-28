@@ -327,9 +327,7 @@ async def test_subscribe_failure_reports_error(
         await commands.subscribe(make_event(), Mock(), args("???"))
 
     assert FakeUniMessage.sent[0] == (
-        "无法订阅\n"
-        "没有认出这个链接。发作者主页、作品链接或作者 ID 都可以\n"
-        "错误码 E-DY-INPUT"
+        "无法订阅\n没能识别 ???\n发送 /爱播订阅 <作者主页、作品链接或作者 ID>"
     )
 
 
@@ -947,32 +945,43 @@ async def test_replied_text_swallows_api_failure() -> None:
     assert await reply.replied_text(event, bot) == ""
 
 
-def test_describe_failure_maps_categories_and_codes() -> None:
+def test_describe_failure_keeps_raw_error_and_user_hint() -> None:
     from nonebot_plugin_ifollow import formatting
     from nonebot_plugin_ifollow.errors import PermanentError, TransientError
 
-    assert formatting.describe_failure(ValueError("坏链接")).code == "E-INPUT"
-    assert (
-        formatting.describe_failure(
-            PermanentError("抖音作者不存在或已注销：x"), platform="douyin"
-        ).code
-        == "E-DY-GONE"
+    usage = "/爱播订阅 <作者主页、作品链接或作者 ID>"
+
+    invalid = formatting.describe_failure(
+        ValueError("坏链接"), value="abc", usage=usage
     )
-    assert (
-        formatting.describe_failure(
-            TransientError("抖音接口被风控拦截"), platform="douyin"
-        ).code
-        == "E-DY-RISK"
+    assert invalid.detail == "没能识别 abc"
+    assert invalid.hint == f"发送 {usage}"
+
+    gone = formatting.describe_failure(PermanentError("抖音作者不存在或已注销：x"))
+    assert gone.detail == "抖音作者不存在或已注销：x"
+    assert gone.hint == "确认一下链接还能不能打开"
+
+    blocked = formatting.describe_failure(
+        TransientError("抖音接口被风控拦截：HTTP 403")
     )
-    assert (
-        formatting.describe_failure(
-            TransientError("B 站投稿列表请求失败：超时"), platform="bilibili"
-        ).code
-        == "E-BILI-NET"
-    )
-    assert formatting.describe_failure(RuntimeError("???"), platform="douyin").code == (
-        "E-DY-UNKNOWN"
-    )
+    assert blocked.detail == "抖音接口被风控拦截：HTTP 403"
+    assert blocked.hint == "稍后再试"
+
+    unknown = formatting.describe_failure(RuntimeError("???"))
+    assert unknown.detail == "???"
+    assert unknown.hint == "稍后再试"
+
+
+def test_raw_error_truncates_and_falls_back_to_class_name() -> None:
+    from nonebot_plugin_ifollow import formatting
+    from nonebot_plugin_ifollow.errors import TransientError
+
+    long_error = formatting.describe_failure(RuntimeError("x" * 500))
+    assert len(long_error.detail) == formatting.RAW_ERROR_LIMIT + 1
+    assert long_error.detail.endswith("…")
+
+    empty_error = formatting.describe_failure(TransientError(""))
+    assert empty_error.detail == "TransientError"
 
 
 def test_render_failure_has_no_stack_details() -> None:
@@ -983,18 +992,19 @@ def test_render_failure_has_no_stack_details() -> None:
     text = formatting.render_failure("订阅", report)
 
     assert "Traceback" not in text
-    assert text.endswith("错误码 E-INPUT")
+    assert text == "无法订阅\n没能识别这个链接\n请重试"
 
 
 @pytest.mark.asyncio
 async def test_subscribe_rejects_unrecognised_input(env: Any) -> None:
-    """识别不出平台时直接给 E-INPUT，而不是把异常字符串丢进群。"""
+    """识别不出平台时给出原始输入和可照抄的命令。"""
 
     with pytest.raises(FinishedException):
         await commands.subscribe(make_event(), Mock(), args("随便一段文字"))
 
-    assert FakeUniMessage.sent[0].startswith("无法订阅\n没有认出这个链接")
-    assert FakeUniMessage.sent[0].endswith("错误码 E-INPUT")
+    assert FakeUniMessage.sent[0] == (
+        "无法订阅\n没能识别 随便一段文字\n发送 /爱播订阅 <作者主页、作品链接或作者 ID>"
+    )
 
 
 @pytest.mark.asyncio
@@ -1048,11 +1058,13 @@ async def test_unsubscribe_rejects_unrecognised_input(env: Any) -> None:
     with pytest.raises(FinishedException):
         await commands.unsubscribe(make_event(), Mock(), args("随便一段文字"))
 
-    assert FakeUniMessage.sent[0].endswith("错误码 E-INPUT")
+    assert FakeUniMessage.sent[0] == (
+        "无法退订\n没能识别 随便一段文字\n发送 /爱播退订 <序号、作者 ID、昵称或链接>"
+    )
 
 
 @pytest.mark.asyncio
-async def test_unsubscribe_network_failure_uses_platform_code(
+async def test_unsubscribe_network_failure_shows_raw_error(
     env: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from nonebot_plugin_ifollow.errors import TransientError
@@ -1069,5 +1081,6 @@ async def test_unsubscribe_network_failure_uses_platform_code(
     with pytest.raises(FinishedException):
         await commands.unsubscribe(make_event(), Mock(), args("https://v.douyin.com/x"))
 
-    assert FakeUniMessage.sent[0].startswith("无法退订\n平台暂时拦截了请求")
-    assert FakeUniMessage.sent[0].endswith("错误码 E-DY-RISK")
+    assert FakeUniMessage.sent[0] == (
+        "无法退订\n抖音接口被风控拦截：HTTP 403\n稍后再试"
+    )

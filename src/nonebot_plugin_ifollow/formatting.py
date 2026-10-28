@@ -6,9 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-import httpx
-
-from .errors import PermanentError, TransientError
+from .errors import PermanentError
 from .models import AuthorSubscription
 from .platforms import Platform
 from .status import platform_name
@@ -66,18 +64,16 @@ def empty_subscription_message() -> str:
     )
 
 
-_PLATFORM_CODES = {"douyin": "DY", "bilibili": "BILI"}
-
-_RISK_HINTS = ("风控", "拦截", "blocked", "403", "412", "429", "-352", "-799", "-509")
 _GONE_HINTS = ("不存在", "已注销", "已删除", "404", "410", "62002")
+RAW_ERROR_LIMIT = 200
+"""原始错误在消息里的最大长度，超长接口响应会截断。"""
 
 
 @dataclass(frozen=True, slots=True)
 class FailureReport:
-    """面向用户的失败说明，附带可供运维检索的错误码。"""
+    """面向用户的失败说明：原始错误 + 一句他能做的事。"""
 
-    code: str
-    reason: str
+    detail: str
     hint: str
 
 
@@ -87,55 +83,42 @@ def author_label(platform: str, name: str) -> str:
     return f"{platform_name(platform)} · {name}"
 
 
-def describe_failure(
-    exc: BaseException, *, platform: str | None = None
-) -> FailureReport:
-    """把异常翻译成用户能照着做的一段说明，细节只留在日志里。"""
+def _raw_error(exc: BaseException) -> str:
+    """把异常压成一行可读文本；空消息退回异常类名。"""
 
-    code = _PLATFORM_CODES.get(platform or "", "")
-    target = platform_name(platform) if platform else "平台"
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    if len(text) > RAW_ERROR_LIMIT:
+        return f"{text[:RAW_ERROR_LIMIT]}…"
+    return text
+
+
+def describe_failure(
+    exc: BaseException, *, value: str = "", usage: str = ""
+) -> FailureReport:
+    """把异常整理成「原始错误 + 用户能做的一步」。
+
+    Args:
+        exc: 捕获到的异常。
+        value: 用户这次输入的原文，链接认不出时回显给他看。
+        usage: 输入类失败时提示的完整命令文本。
+
+    Returns:
+        失败说明；只含用户能执行的动作，不含配置与日志细节。
+    """
+
     text = str(exc).lower()
     if isinstance(exc, ValueError):
-        return FailureReport(
-            _code(code, "INPUT"),
-            "没有认出这个链接",
-            "发作者主页、作品链接或作者 ID 都可以",
-        )
+        detail = f"没能识别 {value}" if value else "没能识别这个链接"
+        return FailureReport(detail, f"发送 {usage}" if usage else "请重试")
     if isinstance(exc, PermanentError) or any(k in text for k in _GONE_HINTS):
-        return FailureReport(
-            _code(code, "GONE"),
-            "作者不存在或已注销",
-            "确认一下链接还能不能打开",
-        )
-    if any(k in text for k in _RISK_HINTS):
-        return FailureReport(
-            _code(code, "RISK"),
-            "平台暂时拦截了请求",
-            f"稍后再试。反复失败就在 .env 里配置{target} Cookie",
-        )
-    if isinstance(exc, (TransientError, httpx.HTTPError)):
-        reason = f"{target}暂时连不上" if platform else "暂时连不上平台"
-        return FailureReport(
-            _code(code, "NET"),
-            reason,
-            "稍后再试",
-        )
-    return FailureReport(
-        _code(code, "UNKNOWN"),
-        "遇到了未预期的问题",
-        "稍后再试。一直失败就把错误码发给我",
-    )
-
-
-def _code(platform_code: str, category: str) -> str:
-    parts = [part for part in (platform_code, category) if part]
-    return "E-" + "-".join(parts)
+        return FailureReport(_raw_error(exc), "确认一下链接还能不能打开")
+    return FailureReport(_raw_error(exc), "稍后再试")
 
 
 def render_failure(action: str, report: FailureReport) -> str:
-    """生成 ``无法订阅`` 这类提示：结论、原因与做法、错误码。"""
+    """生成 ``无法订阅`` 这类提示：结论、原始错误、下一步。"""
 
-    return f"无法{action}\n{report.reason}。{report.hint}\n错误码 {report.code}"
+    return f"无法{action}\n{report.detail}\n{report.hint}"
 
 
 PLATFORM_ORDER: tuple[Platform, ...] = ("douyin", "bilibili")

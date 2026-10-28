@@ -89,20 +89,19 @@ async def subscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> Non
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
     subscriber_id = event.get_user_id()
+    usage = command_text(SUBSCRIBE_COMMAND, "<作者主页、作品链接或作者 ID>")
     try:
         adapter = detect(value)
     except ValueError as exc:
-        report = formatting.describe_failure(exc)
-        logger.warning(
-            f"{SUBSCRIBE_COMMAND}解析失败 code={report.code} value={value!r}"
-        )
+        report = formatting.describe_failure(exc, value=value, usage=usage)
+        logger.warning(f"{SUBSCRIBE_COMMAND}解析失败 value={value!r}：{exc}")
         await UniMessage(formatting.render_failure("订阅", report)).finish()
     try:
         resolved = await adapter.resolve(context.settings, value)
     except Exception as exc:
-        report = formatting.describe_failure(exc, platform=adapter.platform)
+        report = formatting.describe_failure(exc, value=value, usage=usage)
         logger.opt(exception=True).warning(
-            f"{SUBSCRIBE_COMMAND}解析失败 code={report.code} value={value!r}"
+            f"{SUBSCRIBE_COMMAND}解析失败 value={value!r}：{exc}"
         )
         await UniMessage(formatting.render_failure("订阅", report)).finish()
 
@@ -416,18 +415,19 @@ async def _resolve_target(
     matched = match_subscription(items, value)
     if matched is not None:
         return matched.platform, matched.author_id, matched.author_name
+    usage = command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>")
     try:
         adapter = detect(value)
     except ValueError as exc:
-        report = formatting.describe_failure(exc)
-        logger.warning(f"{UNSUBSCRIBE_COMMAND}失败 code={report.code} value={value!r}")
+        report = formatting.describe_failure(exc, value=value, usage=usage)
+        logger.warning(f"{UNSUBSCRIBE_COMMAND}失败 value={value!r}：{exc}")
         await UniMessage(formatting.render_failure("退订", report)).finish()
     try:
         resolved = await adapter.resolve(context.settings, value)
     except Exception as exc:
-        report = formatting.describe_failure(exc, platform=adapter.platform)
+        report = formatting.describe_failure(exc, value=value, usage=usage)
         logger.opt(exception=True).warning(
-            f"{UNSUBSCRIBE_COMMAND}失败 code={report.code} value={value!r}"
+            f"{UNSUBSCRIBE_COMMAND}失败 value={value!r}：{exc}"
         )
         await UniMessage(formatting.render_failure("退订", report)).finish()
     author = resolved.author
