@@ -25,21 +25,20 @@ from .style import (
 
 
 def help_message() -> str:
-    """生成帮助正文；正文里只写命令名，不带前缀。"""
+    """生成帮助正文；紧凑一行一条，不带命令前缀。"""
 
     return (
         f"{HELP_COMMAND}\n"
         f"{SEPARATOR}\n"
-        f"· {SUBSCRIBE_COMMAND} <作者主页、作品链接或作者 ID>\n"
+        f"· {SUBSCRIBE_COMMAND} <主页、作品链接或作者 ID；"
+        "也可引用带链接的消息>\n"
         f"· {LIST_COMMAND}\n"
         f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接>\n"
-        "  （只能退自己的；群管理、群主和机器人管理员可退本群任何订阅）\n"
         f"· {NOTIFY_COMMAND} 开|关\n"
-        "  （群管理 / 群主 / 机器人管理员，私聊订阅人；只影响新作品里的 @）\n"
-        f"· {STATUS_COMMAND}（仅超级用户）\n"
+        f"· {STATUS_COMMAND}\n"
         f"{SEPARATOR}\n"
-        f"引用含链接的消息后发送 {SUBSCRIBE_COMMAND} 也能订阅。\n"
-        "支持抖音与 B 站，首次订阅不补发历史内容。"
+        "退订只能退自己的，群主、群管理和机器人超级用户可以退任意订阅\n"
+        "支持平台：抖音、B站"
     )
 
 
@@ -49,7 +48,7 @@ def usage() -> str:
     return "\n".join(
         (
             command_text(HELP_COMMAND),
-            command_text(SUBSCRIBE_COMMAND, "<作者主页或作品链接>"),
+            command_text(SUBSCRIBE_COMMAND, "<作者主页、作品链接或作者 ID>"),
             command_text(LIST_COMMAND),
             command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>"),
             command_text(NOTIFY_COMMAND, "开|关"),
@@ -62,8 +61,8 @@ def empty_subscription_message() -> str:
     """当前会话没有订阅时的统一提示。"""
 
     return (
-        "当前会话没有爱播订阅。\n"
-        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页链接>')} 开始订阅。"
+        "本会话还没有订阅\n"
+        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页链接>')} 开始订阅"
     )
 
 
@@ -91,38 +90,40 @@ def author_label(platform: str, name: str) -> str:
 def describe_failure(
     exc: BaseException, *, platform: str | None = None
 ) -> FailureReport:
-    """把异常翻译成「人话 + 建议 + 错误码」，细节只留在日志里。"""
+    """把异常翻译成用户能照着做的一段说明，细节只留在日志里。"""
 
     code = _PLATFORM_CODES.get(platform or "", "")
+    target = platform_name(platform) if platform else "平台"
     text = str(exc).lower()
     if isinstance(exc, ValueError):
         return FailureReport(
             _code(code, "INPUT"),
-            "没能识别这个链接",
-            "请发送作者主页链接、作品链接，或直接发作者 ID。",
+            "没有认出这个链接",
+            "发作者主页、作品链接或作者 ID 都可以",
         )
     if isinstance(exc, PermanentError) or any(k in text for k in _GONE_HINTS):
         return FailureReport(
             _code(code, "GONE"),
             "作者不存在或已注销",
-            "请确认链接是否指向仍在更新的作者。",
+            "确认一下链接还能不能打开",
         )
     if any(k in text for k in _RISK_HINTS):
         return FailureReport(
             _code(code, "RISK"),
             "平台暂时拦截了请求",
-            "请稍后重试；多次失败可以在 .env 里配置对应平台的 Cookie。",
+            f"稍后再试。反复失败就在 .env 里配置{target} Cookie",
         )
     if isinstance(exc, (TransientError, httpx.HTTPError)):
+        reason = f"{target}暂时连不上" if platform else "暂时连不上平台"
         return FailureReport(
             _code(code, "NET"),
-            "暂时连不上平台",
-            "请稍后重试。",
+            reason,
+            "稍后再试",
         )
     return FailureReport(
         _code(code, "UNKNOWN"),
-        "遇到未预期的问题",
-        "请稍后重试；如果一直失败，请把下面的错误码发出来。",
+        "遇到了未预期的问题",
+        "稍后再试。一直失败就把错误码发给我",
     )
 
 
@@ -132,9 +133,9 @@ def _code(platform_code: str, category: str) -> str:
 
 
 def render_failure(action: str, report: FailureReport) -> str:
-    """生成 ``订阅失败：…`` 这类消息；只有人话、建议与错误码，没有堆栈。"""
+    """生成 ``无法订阅`` 这类提示：结论、原因与做法、错误码。"""
 
-    return f"{action}失败：{report.reason}\n{report.hint}\n错误码 {report.code}"
+    return f"无法{action}\n{report.reason}。{report.hint}\n错误码 {report.code}"
 
 
 PLATFORM_ORDER: tuple[Platform, ...] = ("douyin", "bilibili")
@@ -169,7 +170,7 @@ def format_handle(author: AuthorSubscription) -> str:
         return ""
     if author.platform == "douyin":
         return f"@{author.author_handle}"
-    return f"UID:{author.author_handle}"
+    return f"UID {author.author_handle}"
 
 
 def format_relative_time(timestamp: int, *, now: float | None = None) -> str:
@@ -222,7 +223,9 @@ def _describe(author: AuthorSubscription, *, now: float | None) -> str:
     if handle := format_handle(author):
         parts.append(handle)
     updated = format_relative_time(author.last_update_time, now=now)
-    return f"{' '.join(parts)} · {updated}"
+    if updated == "未知":
+        return " ".join(parts)
+    return f"{' '.join(parts)} · {updated}更新"
 
 
 __all__ = [

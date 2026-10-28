@@ -198,10 +198,10 @@ def _detail_parts(bundle: MediaBundle) -> list[str]:
     parts: list[str] = []
     if bundle.count > 1:
         parts.append(
-            f"{bundle.count} 张" if not bundle.video_seconds else f"{bundle.count} 个"
+            f"{bundle.count} 个文件" if bundle.video_seconds else f"{bundle.count} 张图"
         )
     if bundle.video_seconds:
-        parts.append(_format_duration(bundle.video_seconds))
+        parts.append(f"时长 {_format_duration(bundle.video_seconds)}")
     if bundle.width and bundle.height:
         parts.append(f"{bundle.width}×{bundle.height}")
     if bundle.total_bytes:
@@ -218,7 +218,7 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         bundle: 下载后的媒体统计。
 
     Returns:
-        形如 ``平台 · 作者 发布了新作品`` + 分隔线 + 文案 + 参数行 + 发布时间的多行
+        形如 ``平台 · 作者 更新了`` + 分隔线 + 文案 + 参数行 + 发布时间的多行
         文案。
     """
 
@@ -227,7 +227,7 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         if meta.platform_name
         else meta.author_name
     )
-    lines = [f"{author} 发布了新作品", SEPARATOR]
+    lines = [f"{author} 更新了", SEPARATOR]
     text = _work_text(result)
     if text:
         lines.extend([text, ""])
@@ -236,12 +236,12 @@ def caption(meta: WorkMeta, result: Any, bundle: MediaBundle) -> str:
         lines.append(" · ".join(details))
     if bundle.skipped:
         lines.append(
-            f"另有 {bundle.skipped} 个媒体超过 "
-            f"{bundle.max_bytes // 1024 // 1024}MB 未发送"
+            f"已跳过 {bundle.skipped} 个超过 "
+            f"{bundle.max_bytes // 1024 // 1024}MB 的文件"
         )
     if meta.create_time:
         stamp = datetime.fromtimestamp(meta.create_time).strftime("%Y-%m-%d %H:%M")
-        lines.append(stamp)
+        lines.append(f"{stamp} 发布")
     return "\n".join(lines)
 
 

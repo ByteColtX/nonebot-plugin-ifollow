@@ -229,7 +229,7 @@ def test_format_handle() -> None:
     bili = AuthorSubscription("bilibili", "123", "作者", author_handle="123")
 
     assert format_handle(douyin) == "@handle"
-    assert format_handle(bili) == "UID:123"
+    assert format_handle(bili) == "UID 123"
     assert format_handle(AuthorSubscription("douyin", "sec", "作者")) == ""
 
 
@@ -279,7 +279,7 @@ async def test_subscribe_existing_target_adds_subscriber(
     snapshot = await store.snapshot()
     subscribers = snapshot["douyin:sec"].targets[target_key()].subscriber_ids
     assert subscribers == ["42", "43"]
-    assert FakeUniMessage.sent[0] == "已为 抖音 · 作者 开启更新提醒。"
+    assert FakeUniMessage.sent[0] == "你已经订阅了 抖音 · 作者，已把你加为订阅人"
 
 
 @pytest.mark.asyncio
@@ -292,7 +292,7 @@ async def test_subscribe_duplicate_reports_noop(
 
     await commands.subscribe(make_event(), Mock(), args("sec"))
 
-    assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 作者，无需重复。"
+    assert FakeUniMessage.sent[0] == "你已经订阅了 抖音 · 作者"
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_subscribe_duplicate_refreshes_metadata(
     author = snapshot["douyin:sec"]
     assert author.author_name == "新名字"
     assert author.author_handle == "新抖音号"
-    assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 新名字，无需重复。"
+    assert FakeUniMessage.sent[0] == "你已经订阅了 抖音 · 新名字"
 
 
 @pytest.mark.asyncio
@@ -327,8 +327,8 @@ async def test_subscribe_failure_reports_error(
         await commands.subscribe(make_event(), Mock(), args("???"))
 
     assert FakeUniMessage.sent[0] == (
-        "订阅失败：没能识别这个链接\n"
-        "请发送作者主页链接、作品链接，或直接发作者 ID。\n"
+        "无法订阅\n"
+        "没有认出这个链接。发作者主页、作品链接或作者 ID 都可以\n"
         "错误码 E-DY-INPUT"
     )
 
@@ -340,7 +340,7 @@ async def test_unsubscribe_by_index(env: Any) -> None:
 
     await commands.unsubscribe(make_event(), Mock(), args("1"))
 
-    assert FakeUniMessage.sent == ["已退订 抖音 · 作者。"]
+    assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
     assert await store.snapshot() == {}
 
 
@@ -352,7 +352,7 @@ async def test_unsubscribe_rejects_invalid_index(env: Any) -> None:
     with pytest.raises(FinishedException):
         await commands.unsubscribe(make_event(), Mock(), args("9"))
 
-    assert "序号无效" in FakeUniMessage.sent[0]
+    assert "没有第 9 个订阅" in FakeUniMessage.sent[0]
 
 
 @pytest.mark.asyncio
@@ -361,7 +361,7 @@ async def test_unsubscribe_without_subscriptions(env: Any) -> None:
         await commands.unsubscribe(make_event(), Mock(), args("1"))
 
     assert FakeUniMessage.sent == [
-        "当前会话没有爱播订阅。\n发送 /爱播订阅 <作者主页链接> 开始订阅。"
+        "本会话还没有订阅\n发送 /爱播订阅 <作者主页链接> 开始订阅"
     ]
 
 
@@ -379,7 +379,7 @@ async def test_unsubscribe_matches_local_id_without_network(
 
     await commands.unsubscribe(make_event(), Mock(), args("sec"))
 
-    assert FakeUniMessage.sent == ["已退订 抖音 · 作者。"]
+    assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
 
 
 @pytest.mark.asyncio
@@ -394,7 +394,7 @@ async def test_unsubscribe_falls_back_to_network_for_short_links(
     await commands.unsubscribe(make_event(), Mock(), args("https://v.douyin.com/x"))
 
     assert adapter.resolve_calls == 1
-    assert FakeUniMessage.sent == ["已退订 抖音 · 作者。"]
+    assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
 
 
 @pytest.mark.asyncio
@@ -408,7 +408,7 @@ async def test_unsubscribe_reports_missing_subscription(
     await commands.unsubscribe(make_event(user_id="99"), Mock(), args("sec"))
 
     assert FakeUniMessage.sent == [
-        "「抖音 · 作者」不是你订阅的，只有订阅人、群管理或机器人管理员可以退订。"
+        "你没有订阅 抖音 · 作者；只有订阅人、群主、群管理和机器人超级用户能退订"
     ]
 
 
@@ -421,7 +421,7 @@ async def test_unsubscribe_member_cannot_cancel_others(env: Any) -> None:
 
     await commands.unsubscribe(make_event(user_id="99"), Mock(), args("1"))
 
-    assert "不是你订阅的" in FakeUniMessage.sent[0]
+    assert "你没有订阅" in FakeUniMessage.sent[0]
     assert len(await store.snapshot()) == 1
 
 
@@ -436,7 +436,7 @@ async def test_unsubscribe_group_admin_cancels_others(env: Any) -> None:
 
     await commands.unsubscribe(event, Mock(), args("1"))
 
-    assert FakeUniMessage.sent == ["已退订 抖音 · 作者。"]
+    assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
     assert await store.snapshot() == {}
 
 
@@ -471,7 +471,7 @@ async def test_unsubscribe_member_cannot_delete_legacy_entry(env: Any) -> None:
 
     await commands.unsubscribe(make_event(user_id="42"), Mock(), args("1"))
 
-    assert "不是你订阅的" in FakeUniMessage.sent[0]
+    assert "你没有订阅" in FakeUniMessage.sent[0]
     assert len(await store.snapshot()) == 1
 
 
@@ -506,7 +506,7 @@ async def test_notify_status_defaults_on(env: Any) -> None:
     await commands.notify_command(make_event(), Mock(), args(""))
 
     assert FakeUniMessage.sent == [
-        "爱播提醒：本会话 @ 提醒已开启（共 1 个订阅）\n设置：/爱播提醒 开|关。"
+        "@ 提醒已开启（本会话 1 个订阅）\n修改：/爱播提醒 开|关"
     ]
 
 
@@ -519,7 +519,7 @@ async def test_notify_admin_can_disable_all(env: Any, tmp_path: Path) -> None:
 
     await commands.notify_command(event, Mock(), args("关"))
 
-    assert FakeUniMessage.sent == ["已关闭本会话 1 个订阅的 @ 提醒。新作品仍会发送。"]
+    assert FakeUniMessage.sent == ["已关闭 @ 提醒，新作品仍会正常推送"]
     snapshot = await store.snapshot()
     assert snapshot["douyin:sec"].targets[key].mention is False
     reloaded = await SubscriptionStore(tmp_path).snapshot()
@@ -547,7 +547,7 @@ async def test_notify_off_applies_to_later_subscriptions(
 
     await commands.notify_command(event, Mock(), args(""))
     assert FakeUniMessage.sent[-1] == (
-        "爱播提醒：本会话 @ 提醒已关闭（共 2 个订阅）\n设置：/爱播提醒 开|关。"
+        "@ 提醒已关闭（本会话 2 个订阅）\n修改：/爱播提醒 开|关"
     )
 
 
@@ -570,7 +570,7 @@ async def test_notify_without_subscriptions(env: Any) -> None:
         await commands.notify_command(make_event(), Mock(), args("关"))
 
     assert FakeUniMessage.sent == [
-        "当前会话没有爱播订阅。\n发送 /爱播订阅 <作者主页链接> 开始订阅。"
+        "本会话还没有订阅\n发送 /爱播订阅 <作者主页链接> 开始订阅"
     ]
 
 
@@ -584,7 +584,7 @@ async def test_notify_reports_already_disabled(env: Any) -> None:
 
     await commands.notify_command(event, Mock(), args("关"))
 
-    assert FakeUniMessage.sent == ["本会话的 @ 提醒已经是关闭状态。"]
+    assert FakeUniMessage.sent == ["@ 提醒本来就关着"]
 
 
 @pytest.mark.asyncio
@@ -595,9 +595,7 @@ async def test_notify_member_cannot_change(env: Any) -> None:
     with pytest.raises(FinishedException):
         await commands.notify_command(make_event(user_id="42"), Mock(), args("关"))
 
-    assert FakeUniMessage.sent == [
-        "只有群主、群管理员或机器人超级用户可以设置 @ 提醒。"
-    ]
+    assert FakeUniMessage.sent == ["只有群主、群管理和机器人超级用户能修改 @ 提醒"]
     snapshot = await store.snapshot()
     assert snapshot["douyin:sec"].targets[key].mention is True
 
@@ -622,7 +620,7 @@ async def test_notify_private_subscriber_can_change(
 
     await commands.notify_command(make_event(user_id="42"), Mock(), args("关"))
 
-    assert FakeUniMessage.sent == ["已关闭本会话 1 个订阅的 @ 提醒。新作品仍会发送。"]
+    assert FakeUniMessage.sent == ["已关闭 @ 提醒，新作品仍会正常推送"]
     snapshot = await store.snapshot()
     assert snapshot["douyin:sec"].targets[key].mention is False
 
@@ -648,7 +646,7 @@ async def test_notify_private_non_subscriber_cannot_change(
     with pytest.raises(FinishedException):
         await commands.notify_command(make_event(user_id="77"), Mock(), args("关"))
 
-    assert FakeUniMessage.sent == ["只有本会话的订阅人可以设置 @ 提醒。"]
+    assert FakeUniMessage.sent == ["只有订阅人能修改 @ 提醒"]
     snapshot = await store.snapshot()
     assert snapshot["douyin:sec"].targets[key].mention is True
 
@@ -664,13 +662,21 @@ def test_quoted_author_parses_notice() -> None:
     """引用通知时能从首行认出平台和作者。"""
 
     text = (
-        "抖音 · 01年的小女孩 发布了新作品\n"
+        "抖音 · 01年的小女孩 更新了\n"
         "────────────\n"
         "#泳装搭配指南👙\n"
         "\n"
-        "00:06 · 720×1280 · 2.5 MB\n"
-        "2026-10-19 01:39"
+        "时长 00:06 · 720×1280 · 2.5 MB\n"
+        "2026-10-19 01:39 发布"
     )
+
+    assert commands.quoted_author(FakeReply(text)) == ("抖音", "01年的小女孩")
+
+
+def test_quoted_author_parses_legacy_notice() -> None:
+    """旧卡片的后缀仍要能认出来，历史消息还能引用退订。"""
+
+    text = "抖音 · 01年的小女孩 发布了新作品\n────"
 
     assert commands.quoted_author(FakeReply(text)) == ("抖音", "01年的小女孩")
 
@@ -689,11 +695,11 @@ async def test_unsubscribe_from_quoted_notice(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)  # 订阅人是 42
     event = make_event(user_id="42")
-    event.reply = FakeReply("抖音 · 作者 发布了新作品\n────")
+    event.reply = FakeReply("抖音 · 作者 更新了\n────")
 
     await commands.unsubscribe(event, Mock(), args(""))
 
-    assert FakeUniMessage.sent == ["已退订 抖音 · 作者。"]
+    assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
     assert await store.snapshot() == {}
 
 
@@ -704,12 +710,12 @@ async def test_unsubscribe_from_quoted_notice_unknown_author(env: Any) -> None:
     store, _ = env
     await seed_subscription(store)
     event = make_event(user_id="42")
-    event.reply = FakeReply("抖音 · 别人 发布了新作品\n────")
+    event.reply = FakeReply("抖音 · 别人 更新了\n────")
 
     with pytest.raises(FinishedException):
         await commands.unsubscribe(event, Mock(), args(""))
 
-    assert "「别人」当前没有订阅" in FakeUniMessage.sent[0]
+    assert "别人 不在本会话的订阅列表里" in FakeUniMessage.sent[0]
     assert len(await store.snapshot()) == 1
 
 
@@ -840,7 +846,7 @@ async def test_list_subscriptions_shows_authors(env: Any) -> None:
         "爱播列表（1 个）\n"
         f"{commands.formatting.SEPARATOR}\n"
         "抖音\n"
-        "1. 作者 @handle · 未知\n"
+        "1. 作者 @handle\n"
         "\n"
         "退订：/爱播退订 <序号>"
     )
@@ -851,7 +857,7 @@ async def test_list_subscriptions_reports_empty(env: Any) -> None:
     await commands.list_subscriptions(make_event(), Mock())
 
     assert FakeUniMessage.sent == [
-        "当前会话没有爱播订阅。\n发送 /爱播订阅 <作者主页链接> 开始订阅。"
+        "本会话还没有订阅\n发送 /爱播订阅 <作者主页链接> 开始订阅"
     ]
 
 
@@ -868,7 +874,7 @@ async def test_status_command_rejects_non_superuser(
     with pytest.raises(FinishedException):
         await commands.status_command(make_event(), Mock())
 
-    assert FakeUniMessage.sent == ["仅超级用户可以使用 /爱播状态。"]
+    assert FakeUniMessage.sent == ["/爱播状态 只对超级用户开放"]
 
 
 @pytest.mark.asyncio
@@ -987,7 +993,7 @@ async def test_subscribe_rejects_unrecognised_input(env: Any) -> None:
     with pytest.raises(FinishedException):
         await commands.subscribe(make_event(), Mock(), args("随便一段文字"))
 
-    assert FakeUniMessage.sent[0].startswith("订阅失败：没能识别这个链接")
+    assert FakeUniMessage.sent[0].startswith("无法订阅\n没有认出这个链接")
     assert FakeUniMessage.sent[0].endswith("错误码 E-INPUT")
 
 
@@ -1004,7 +1010,7 @@ async def test_subscribe_race_falls_back_to_duplicate_message(
 
     await commands.subscribe(make_event(), Mock(), args("sec"))
 
-    assert FakeUniMessage.sent[0] == "本会话已订阅 抖音 · 作者，无需重复。"
+    assert FakeUniMessage.sent[0] == "你已经订阅了 抖音 · 作者"
 
 
 @pytest.mark.asyncio
@@ -1013,8 +1019,7 @@ async def test_unsubscribe_requires_a_value(env: Any) -> None:
         await commands.unsubscribe(make_event(), Mock(), args(""))
 
     assert FakeUniMessage.sent == [
-        "用法：/爱播退订 <序号、作者 ID、昵称或链接>\n"
-        "也可以引用一条爱播通知后直接发 /爱播退订。"
+        "用法：/爱播退订 <序号、作者 ID、昵称或链接>\n也可以引用一条推送再发 /爱播退订"
     ]
 
 
@@ -1029,7 +1034,7 @@ async def test_unsubscribe_keeps_other_subscribers(env: Any) -> None:
     await commands.unsubscribe(make_event(), Mock(), args("sec"))
 
     assert FakeUniMessage.sent == [
-        "已退订你在 抖音 · 作者 的提醒，其他订阅人仍会收到通知。"
+        "已关闭你在 抖音 · 作者 的 @ 提醒；其他订阅人仍会收到推送"
     ]
     snapshot = await store.snapshot()
     assert snapshot["douyin:sec"].targets[key].subscriber_ids == ["43"]
@@ -1064,5 +1069,5 @@ async def test_unsubscribe_network_failure_uses_platform_code(
     with pytest.raises(FinishedException):
         await commands.unsubscribe(make_event(), Mock(), args("https://v.douyin.com/x"))
 
-    assert FakeUniMessage.sent[0].startswith("退订失败：平台暂时拦截了请求")
+    assert FakeUniMessage.sent[0].startswith("无法退订\n平台暂时拦截了请求")
     assert FakeUniMessage.sent[0].endswith("错误码 E-DY-RISK")

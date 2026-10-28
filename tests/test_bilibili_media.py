@@ -96,7 +96,7 @@ async def test_bilibili_media_messages_sends_video(
         assert created["dir"].is_dir()
         caption = messages[0].extract_plain_text()
         assert caption.startswith(
-            f"B站 · 原神 发布了新作品\n{media.SEPARATOR}\n视频标题\n视频简介\n\n07:30"
+            f"B站 · 原神 更新了\n{media.SEPARATOR}\n视频标题\n视频简介\n\n时长 07:30"
         )
         assert [segment.type for segment in messages[1]] == ["video"]
 
@@ -127,7 +127,7 @@ async def test_bilibili_media_messages_falls_back_to_subscription_name(
         make_work(url, author_name=""), settings, "三角洲行动"
     ) as messages:
         caption = messages[0].extract_plain_text()
-        assert caption.startswith("B站 · 三角洲行动 发布了新作品")
+        assert caption.startswith("B站 · 三角洲行动 更新了")
 
 
 @pytest.mark.asyncio
@@ -154,9 +154,7 @@ async def test_bilibili_media_messages_sends_dynamic_images(
         make_work(url, kind="dynamic"), settings
     ) as messages:
         caption = messages[0].extract_plain_text()
-        assert caption.startswith(
-            f"B站 · 原神 发布了新作品\n{media.SEPARATOR}\n动态正文"
-        )
+        assert caption.startswith(f"B站 · 原神 更新了\n{media.SEPARATOR}\n动态正文")
         assert [segment.type for segment in messages[1]] == ["image"]
 
     assert created["url"] == url
