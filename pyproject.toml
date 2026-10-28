@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-ifollow"
-version = "2.2.1"
+version = "2.3.0"
 description = "NoneBot2 多平台作者更新订阅插件"
 readme = "README.md"
 requires-python = ">=3.12"
