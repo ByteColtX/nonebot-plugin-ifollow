@@ -59,6 +59,13 @@ AID_WEB = "6383"
 POST_AIDS = (AID_MOBILE, AID_WEB)
 """作品列表要同时查询的客户端号；合并后兼顾实时性与图文完整性。"""
 
+POST_PAGE_SIZE = 20
+"""作品列表单页条数。
+
+不传 ``count`` 时 1128 只回 2 条、6383 只回 3 条，图文（``aweme_type=68``）
+几乎全漏；按 20 条拉取不增加请求数，只是每页多拿数据。
+"""
+
 NOTE_AWEME_TYPE = 68
 """图文作品的 ``aweme_type``。"""
 
@@ -292,6 +299,7 @@ async def _fetch_post_page(
         # 能返回图文，列表却可能滞后数天。fetch() 同时拉两条流再合并，两个
         # 客户端各自翻页，互不干扰。
         "aid": aid,
+        "count": str(POST_PAGE_SIZE),
         "channel": "channel_pc_web",
         "sec_user_id": sec_user_id,
         "max_cursor": max_cursor,
