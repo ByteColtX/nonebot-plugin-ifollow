@@ -359,7 +359,7 @@ async def test_unsubscribe_without_subscriptions(env: Any) -> None:
         await commands.unsubscribe(make_event(), Mock(), args("1"))
 
     assert FakeUniMessage.sent == [
-        "本会话还没有订阅\n发送 /爱播订阅 <作者主页链接> 开始订阅"
+        "本会话还没有订阅\n发送 /爱播订阅 <作者主页、作品链接或作者 ID> 开始订阅"
     ]
 
 
@@ -568,7 +568,7 @@ async def test_notify_without_subscriptions(env: Any) -> None:
         await commands.notify_command(make_event(), Mock(), args("关"))
 
     assert FakeUniMessage.sent == [
-        "本会话还没有订阅\n发送 /爱播订阅 <作者主页链接> 开始订阅"
+        "本会话还没有订阅\n发送 /爱播订阅 <作者主页、作品链接或作者 ID> 开始订阅"
     ]
 
 
@@ -855,7 +855,7 @@ async def test_list_subscriptions_reports_empty(env: Any) -> None:
     await commands.list_subscriptions(make_event(), Mock())
 
     assert FakeUniMessage.sent == [
-        "本会话还没有订阅\n发送 /爱播订阅 <作者主页链接> 开始订阅"
+        "本会话还没有订阅\n发送 /爱播订阅 <作者主页、作品链接或作者 ID> 开始订阅"
     ]
 
 

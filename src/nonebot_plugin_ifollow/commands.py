@@ -407,8 +407,9 @@ async def _resolve_target(
     if value.isdecimal():
         index = int(value)
         if not 1 <= index <= len(items):
+            hint = "只能输入 1" if len(items) == 1 else f"输入 1-{len(items)}"
             await UniMessage(
-                f"没有第 {index} 个订阅；当前共 {len(items)} 个，输入 1-{len(items)}"
+                f"没有第 {index} 个订阅；当前共 {len(items)} 个，{hint}"
             ).finish()
         selected = items[index - 1]
         return selected.platform, selected.author_id, selected.author_name

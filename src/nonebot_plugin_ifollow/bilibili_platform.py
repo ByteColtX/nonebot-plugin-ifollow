@@ -149,7 +149,7 @@ async def _author_id_from_video(settings: Settings, value: str) -> str:
             return mid
         video = extract_bilibili_video(value)
     if video is None:
-        raise ValueError("请输入 B 站作者主页、BV/AV 视频链接或 b23.tv 短链")
+        raise ValueError("请输入 B站作者主页、BV/AV 视频链接或 b23.tv 短链")
     kind, identifier = video
     try:
         info = await Video(
@@ -158,10 +158,10 @@ async def _author_id_from_video(settings: Settings, value: str) -> str:
             credential=_credential(settings),
         ).get_info()
     except Exception as exc:
-        raise _wrap_error("B 站作品详情请求失败", exc) from exc
+        raise _wrap_error("B站作品详情请求失败", exc) from exc
     owner = info.get("owner")
     if not isinstance(owner, dict) or not owner.get("mid"):
-        raise TransientError("B 站作品详情缺少作者信息")
+        raise TransientError("B站作品详情缺少作者信息")
     return str(owner["mid"])
 
 
@@ -182,7 +182,7 @@ async def _resolve_short_link(value: str) -> str:
             response.raise_for_status()
             return str(response.url)
     except Exception as exc:
-        raise _wrap_error("B 站短链解析失败", exc) from exc
+        raise _wrap_error("B站短链解析失败", exc) from exc
 
 
 async def fetch_author_profile(settings: Settings, mid: str) -> AuthorInfo:
@@ -202,7 +202,7 @@ async def _fetch_author_profile_app(mid: str) -> AuthorInfo:
         data = await _app_get(client, "/x/v2/space", {"vmid": mid})
     card = data.get("card")
     if not isinstance(card, dict) or not card.get("mid"):
-        raise TransientError("B 站 APP 作者资料返回格式异常")
+        raise TransientError("B站 APP 作者资料返回格式异常")
     return AuthorInfo(
         author_id=str(card["mid"]),
         name=str(card.get("name") or card["mid"]),
@@ -218,9 +218,9 @@ async def _fetch_author_profile_web(settings: Settings, mid: str) -> AuthorInfo:
     try:
         info = await User(int(mid), credential=_credential(settings)).get_user_info()
     except Exception as exc:
-        raise _wrap_error("B 站作者资料请求失败", exc) from exc
+        raise _wrap_error("B站作者资料请求失败", exc) from exc
     if not isinstance(info, dict) or not info.get("mid"):
-        raise TransientError("B 站作者资料返回格式异常")
+        raise TransientError("B站作者资料返回格式异常")
     return AuthorInfo(
         author_id=str(info["mid"]),
         name=str(info.get("name") or info["mid"]),
@@ -310,7 +310,7 @@ async def _fetch_video_app(
             data = await _app_get(client, "/x/v2/space/archive/cursor", params)
             items = data.get("item") or []
             if not isinstance(items, list):
-                raise TransientError("B 站 APP 投稿列表缺少 item")
+                raise TransientError("B站 APP 投稿列表缺少 item")
             works: list[PlatformWork] = []
             joint_ids: set[int] = set()
             for item in items:
@@ -357,12 +357,12 @@ async def _fetch_video_web(
                 with_current=False,
             )
         except Exception as exc:
-            raise _wrap_error("B 站投稿列表请求失败", exc) from exc
+            raise _wrap_error("B站投稿列表请求失败", exc) from exc
         if not isinstance(result, dict):
-            raise TransientError("B 站投稿列表返回格式异常")
+            raise TransientError("B站投稿列表返回格式异常")
         items = result.get("media_list") or []
         if not isinstance(items, list):
-            raise TransientError("B 站投稿列表缺少 media_list")
+            raise TransientError("B站投稿列表缺少 media_list")
         works: list[PlatformWork] = []
         for item in items:
             if author is None and _is_collaborator_item(item, mid):
@@ -394,12 +394,12 @@ async def _fetch_dynamics(
         try:
             result = await user.get_dynamics_new(offset=token or "")
         except Exception as exc:
-            raise _wrap_error("B 站动态列表请求失败", exc) from exc
+            raise _wrap_error("B站动态列表请求失败", exc) from exc
         if not isinstance(result, dict):
-            raise TransientError("B 站动态列表返回格式异常")
+            raise TransientError("B站动态列表返回格式异常")
         items = result.get("items") or []
         if not isinstance(items, list):
-            raise TransientError("B 站动态列表缺少 items")
+            raise TransientError("B站动态列表缺少 items")
         works = [work for item in items if (work := _parse_dynamic_item(item, mid))]
         next_offset = str(result.get("offset") or "")
         return Page(
@@ -453,26 +453,26 @@ async def _app_get(
             last_error = exc
             continue
         if not isinstance(payload, dict):
-            last_error = TransientError("B 站 APP 接口返回格式异常")
+            last_error = TransientError("B站 APP 接口返回格式异常")
             continue
         code = payload.get("code")
         if code != 0:
             if code in PERMANENT_APP_CODES:
                 raise PermanentError(
-                    f"B 站 APP 接口返回 {code}：{payload.get('message') or ''}"
+                    f"B站 APP 接口返回 {code}：{payload.get('message') or ''}"
                 )
             last_error = TransientError(
-                f"B 站 APP 接口返回 {code}：{payload.get('message') or ''}"
+                f"B站 APP 接口返回 {code}：{payload.get('message') or ''}"
             )
             continue
         data = payload.get("data")
         if not isinstance(data, dict):
-            last_error = TransientError("B 站 APP 接口缺少 data")
+            last_error = TransientError("B站 APP 接口缺少 data")
             continue
         return data
     if isinstance(last_error, TransientError):
         raise last_error
-    raise _wrap_error("B 站 APP 接口请求失败", last_error or RuntimeError("未知错误"))
+    raise _wrap_error("B站 APP 接口请求失败", last_error or RuntimeError("未知错误"))
 
 
 def _parse_app_video_item(item: Any, mid: str) -> PlatformWork | None:

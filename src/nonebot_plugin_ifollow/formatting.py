@@ -50,7 +50,7 @@ def usage() -> str:
             command_text(LIST_COMMAND),
             command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>"),
             command_text(NOTIFY_COMMAND, "开|关"),
-            f"{command_text(STATUS_COMMAND)}（超级用户）",
+            f"{command_text(STATUS_COMMAND)}（仅超级用户）",
         )
     )
 
@@ -60,7 +60,8 @@ def empty_subscription_message() -> str:
 
     return (
         "本会话还没有订阅\n"
-        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页链接>')} 开始订阅"
+        f"发送 {command_text(SUBSCRIBE_COMMAND, '<作者主页、作品链接或作者 ID>')}"
+        " 开始订阅"
     )
 
 

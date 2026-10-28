@@ -48,4 +48,4 @@ def detect(value: str) -> PlatformAdapter:
     for candidate in ADAPTERS:
         if candidate.matches(value):
             return candidate
-    raise ValueError("请输入抖音或 B 站的作者主页链接、作品链接，或作者 ID")
+    raise ValueError("请输入抖音或 B站的作者主页链接、作品链接，或作者 ID")

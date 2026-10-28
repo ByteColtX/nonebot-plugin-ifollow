@@ -12,7 +12,7 @@ from .settings import Config
 
 __plugin_meta__ = PluginMetadata(
     name="爱播作者订阅",
-    description="订阅抖音和 B 站作者的新作品及动态并发送",
+    description="订阅抖音和 B站作者的新作品及动态并发送",
     usage=usage(),
     type="application",
     homepage="https://github.com/ByteColtX/nonebot-plugin-ifollow",
