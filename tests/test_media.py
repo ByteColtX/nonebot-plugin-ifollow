@@ -226,20 +226,25 @@ async def test_media_segments_use_local_path_by_default(tmp_path: Path) -> None:
     assert all(segment.url is None for segment in segments)
 
 
-async def test_media_segments_switch_to_base64_when_enabled(tmp_path: Path) -> None:
-    """跨主机部署时改用 base64 消息段。"""
+async def test_media_segments_switch_to_raw_bytes_when_enabled(tmp_path: Path) -> None:
+    """跨主机部署时交给导出层编码，不自己拼 base64:// 地址。"""
 
     video = write(tmp_path / "work", suffix=".mp4")
+    image = write(tmp_path / "img")
 
     bundle = await media.media_messages(
-        [make_file(video)], policy(base64_media=True), "抖音"
+        [make_file(video), make_file(image)], policy(base64_media=True), "抖音"
     )
 
-    (segment,) = list(bundle.messages[0])
-    assert segment.path is None
-    assert segment.raw is None
-    assert segment.url is not None
-    assert segment.url.startswith("base64://")
+    segments = [segment for message in bundle.messages for segment in message]
+    assert segments
+    assert all(segment.path is None for segment in segments)
+    assert all(segment.url is None for segment in segments)
+    assert all(segment.raw for segment in segments)
+    assert [segment.raw for segment in segments] == [
+        video.read_bytes(),
+        image.read_bytes(),
+    ]
 
 
 class FakeRef:
