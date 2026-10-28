@@ -142,6 +142,31 @@ async def seed_subscription(
     return key
 
 
+async def seed_author(
+    store: SubscriptionStore,
+    platform: Any,
+    author_id: str,
+    name: str,
+    *,
+    subscriber_ids: tuple[str, ...] = ("42",),
+) -> None:
+    """给当前会话订阅一个作者，可带多个订阅人。"""
+
+    key = target_key()
+    await store.add_target(
+        platform,
+        author_id,
+        name,
+        key,
+        Target.group("group").dump(),
+        {"video": Cursor("old", 1)},
+        subscriber_id=subscriber_ids[0],
+        author_handle="handle",
+    )
+    for subscriber_id in subscriber_ids[1:]:
+        await store.add_subscriber(platform, author_id, key, subscriber_id)
+
+
 class FakeForwardBot:
     """记录合并转发调用；fail=True 时模拟协议端不支持。"""
 
@@ -340,6 +365,80 @@ async def test_unsubscribe_by_index(env: Any) -> None:
 
     assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
     assert await store.snapshot() == {}
+
+
+def test_parse_indexes_accepts_common_separators() -> None:
+    """空格、英文逗号、中文逗号、顿号都能分隔序号。"""
+
+    assert commands.parse_indexes("1 3") == [1, 3]
+    assert commands.parse_indexes("1,2，3、4") == [1, 2, 3, 4]
+    assert commands.parse_indexes("1 1 2") == [1, 2]
+    assert commands.parse_indexes("1 sec") is None
+    assert commands.parse_indexes("") is None
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_many_by_index(env: Any) -> None:
+    """一次退订多个序号，结果合成一条消息。"""
+
+    store, _ = env
+    await seed_subscription(store)
+    await seed_author(store, "bilibili", "123", "三角洲行动")
+
+    await commands.unsubscribe(make_event(), Mock(), args("1,2"))
+
+    assert FakeUniMessage.sent == ["已退订 2 个订阅\n抖音 · 作者\nB站 · 三角洲行动"]
+    assert await store.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_many_groups_results(env: Any) -> None:
+    """整条退订、只关提醒、无权限三种结果分组列出。"""
+
+    store, _ = env
+    await seed_subscription(store)
+    await seed_author(
+        store, "bilibili", "123", "三角洲行动", subscriber_ids=("42", "43")
+    )
+    await seed_author(store, "bilibili", "456", "别人订阅的", subscriber_ids=("99",))
+
+    await commands.unsubscribe(make_event(), Mock(), args("1、2、3"))
+
+    assert FakeUniMessage.sent == [
+        "已退订 1 个订阅\n"
+        "抖音 · 作者\n\n"
+        "已关闭 1 个订阅的 @ 提醒，其他订阅人仍会收到推送\n"
+        "B站 · 三角洲行动\n\n"
+        "有 1 个不是你订阅的；只有订阅人、群主、群管理和机器人超级用户能退订\n"
+        "B站 · 别人订阅的"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_many_rejects_any_invalid_index(env: Any) -> None:
+    """批量里有一个越界就整体不执行，避免误退。"""
+
+    store, _ = env
+    await seed_subscription(store)
+    await seed_author(store, "bilibili", "123", "三角洲行动")
+
+    with pytest.raises(FinishedException):
+        await commands.unsubscribe(make_event(), Mock(), args("1 5 9"))
+
+    assert FakeUniMessage.sent == ["没有第 5、9 个订阅；当前共 2 个，输入 1-2"]
+    assert len(await store.snapshot()) == 2
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_duplicate_index_stays_single(env: Any) -> None:
+    """重复序号去重后按单条处理，走原来的消息。"""
+
+    store, _ = env
+    await seed_subscription(store)
+
+    await commands.unsubscribe(make_event(), Mock(), args("1 1"))
+
+    assert FakeUniMessage.sent == ["已退订 抖音 · 作者"]
 
 
 @pytest.mark.asyncio
@@ -846,7 +945,7 @@ async def test_list_subscriptions_shows_authors(env: Any) -> None:
         "抖音\n"
         "1. 作者 @handle\n"
         "\n"
-        "退订：/爱播退订 <序号>"
+        "退订：/爱播退订 <序号，可一次多个>"
     )
 
 
@@ -1029,7 +1128,9 @@ async def test_unsubscribe_requires_a_value(env: Any) -> None:
         await commands.unsubscribe(make_event(), Mock(), args(""))
 
     assert FakeUniMessage.sent == [
-        "用法：/爱播退订 <序号、作者 ID、昵称或链接>\n也可以引用一条推送再发 /爱播退订"
+        "用法：/爱播退订 <序号、作者 ID、昵称或链接>\n"
+        "序号可以一次写多个，例如 1 3 5\n"
+        "也可以引用一条推送再发 /爱播退订"
     ]
 
 

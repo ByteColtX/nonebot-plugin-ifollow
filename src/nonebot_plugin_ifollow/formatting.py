@@ -31,7 +31,7 @@ def help_message() -> str:
         f"· {SUBSCRIBE_COMMAND} <主页、作品链接或作者 ID；"
         "也可引用带链接的消息>\n"
         f"· {LIST_COMMAND}\n"
-        f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接>\n"
+        f"· {UNSUBSCRIBE_COMMAND} <序号、作者 ID、昵称或链接；序号可一次多个>\n"
         f"· {NOTIFY_COMMAND} 开|关\n"
         f"· {STATUS_COMMAND}\n"
         f"{SEPARATOR}\n"
@@ -48,7 +48,9 @@ def usage() -> str:
             command_text(HELP_COMMAND),
             command_text(SUBSCRIBE_COMMAND, "<作者主页、作品链接或作者 ID>"),
             command_text(LIST_COMMAND),
-            command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>"),
+            command_text(
+                UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接；序号可一次多个>"
+            ),
             command_text(NOTIFY_COMMAND, "开|关"),
             f"{command_text(STATUS_COMMAND)}（仅超级用户）",
         )
@@ -196,7 +198,9 @@ def subscription_list(
             current_platform = author.platform
             lines.append(platform_name(author.platform))
         lines.append(f"{index}. {_describe(author, now=now)}")
-    lines.extend(["", f"退订：{command_text(UNSUBSCRIBE_COMMAND, '<序号>')}"])
+    lines.extend(
+        ["", f"退订：{command_text(UNSUBSCRIBE_COMMAND, '<序号，可一次多个>')}"]
+    )
     return "\n".join(lines)
 
 

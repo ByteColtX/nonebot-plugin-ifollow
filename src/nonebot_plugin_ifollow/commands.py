@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from nonebot import get_driver, logger, on_command
 from nonebot.adapters import Bot, Event, Message
 from nonebot.params import CommandArg
 from nonebot_plugin_alconna import UniMessage
-from nonebot_plugin_alconna.uniseg import get_target
+from nonebot_plugin_alconna.uniseg import Target, get_target
 
 from . import formatting, reply
 from .adapters import detect
@@ -234,6 +235,112 @@ def quoted_author(reply: Any) -> tuple[str, str] | None:
     return None
 
 
+_INDEX_SEPARATORS = re.compile(r"[\s,，、]+")
+
+
+def parse_indexes(value: str) -> list[int] | None:
+    """解析「1 3」「1,2」「1、2」这类序号列表。
+
+    Args:
+        value: 用户输入。
+
+    Returns:
+        去重后的序号；不是纯序号时返回 ``None``。
+    """
+
+    tokens = [token for token in _INDEX_SEPARATORS.split(value.strip()) if token]
+    if not tokens or not all(token.isdecimal() for token in tokens):
+        return None
+    indexes: list[int] = []
+    for token in tokens:
+        index = int(token)
+        if index not in indexes:
+            indexes.append(index)
+    return indexes
+
+
+def _invalid_index_message(indexes: list[int], total: int) -> str:
+    """生成越界序号的提示，支持一次列出多个。"""
+
+    joined = "、".join(str(index) for index in indexes)
+    hint = "只能输入 1" if total == 1 else f"输入 1-{total}"
+    return f"没有第 {joined} 个订阅；当前共 {total} 个，{hint}"
+
+
+def _batch_unsubscribe_text(
+    whole: list[AuthorSubscription],
+    partial: list[AuthorSubscription],
+    denied: list[AuthorSubscription],
+) -> str:
+    """拼出批量退订结果：按结果分组，每组先计数再列作者。"""
+
+    def labels(authors: list[AuthorSubscription]) -> list[str]:
+        return [
+            formatting.author_label(author.platform, author.author_name)
+            for author in authors
+        ]
+
+    sections: list[list[str]] = []
+    if whole:
+        sections.append([f"已退订 {len(whole)} 个订阅", *labels(whole)])
+    if partial:
+        sections.append(
+            [
+                f"已关闭 {len(partial)} 个订阅的 @ 提醒，其他订阅人仍会收到推送",
+                *labels(partial),
+            ]
+        )
+    if denied:
+        sections.append(
+            [
+                f"有 {len(denied)} 个不是你订阅的；只有订阅人、群主、群管理和"
+                "机器人超级用户能退订",
+                *labels(denied),
+            ]
+        )
+    return "\n\n".join("\n".join(section) for section in sections)
+
+
+async def _unsubscribe_many(
+    context: Runtime,
+    items: list[AuthorSubscription],
+    indexes: list[int],
+    event: Event,
+    target: Target,
+    bot: Bot,
+) -> None:
+    """按序号批量退订，结果合并成一条消息。"""
+
+    invalid = [index for index in indexes if not 1 <= index <= len(items)]
+    if invalid:
+        await UniMessage(_invalid_index_message(invalid, len(items))).finish()
+    target_key = make_target_key(target.dump())
+    user_id = event.get_user_id()
+    force = can_manage(event)
+    whole: list[AuthorSubscription] = []
+    partial: list[AuthorSubscription] = []
+    denied: list[AuthorSubscription] = []
+    async with context.store.transaction():
+        for index in indexes:
+            author = items[index - 1]
+            removed, target_removed = await context.store.remove_subscriber(
+                author.platform,
+                author.author_id,
+                target_key,
+                user_id,
+                force=force,
+            )
+            if removed and target_removed:
+                whole.append(author)
+            elif removed:
+                partial.append(author)
+            else:
+                denied.append(author)
+    await UniMessage(_batch_unsubscribe_text(whole, partial, denied)).send(
+        target=target, bot=bot
+    )
+
+
 @UNSUBSCRIBE.handle()
 async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> None:
     """退订当前会话的订阅。
@@ -250,7 +357,9 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
     if not value and quoted is None:
         usage = command_text(UNSUBSCRIBE_COMMAND, "<序号、作者 ID、昵称或链接>")
         await UniMessage(
-            f"用法：{usage}\n也可以引用一条推送再发 {command_text(UNSUBSCRIBE_COMMAND)}"
+            f"用法：{usage}\n"
+            "序号可以一次写多个，例如 1 3 5\n"
+            f"也可以引用一条推送再发 {command_text(UNSUBSCRIBE_COMMAND)}"
         ).finish()
     target = get_target(event, bot)
     target_key = make_target_key(target.dump())
@@ -274,6 +383,12 @@ async def unsubscribe(event: Event, bot: Bot, args: Message = CommandArg()) -> N
             matched[0].author_name,
         )
     else:
+        indexes = parse_indexes(value)
+        if indexes is not None:
+            if len(indexes) > 1:
+                await _unsubscribe_many(context, items, indexes, event, target, bot)
+                return
+            value = str(indexes[0])
         platform, author_id, author_name = await _resolve_target(context, items, value)
     label = formatting.author_label(platform, author_name)
     force = can_manage(event)
@@ -407,10 +522,7 @@ async def _resolve_target(
     if value.isdecimal():
         index = int(value)
         if not 1 <= index <= len(items):
-            hint = "只能输入 1" if len(items) == 1 else f"输入 1-{len(items)}"
-            await UniMessage(
-                f"没有第 {index} 个订阅；当前共 {len(items)} 个，{hint}"
-            ).finish()
+            await UniMessage(_invalid_index_message([index], len(items))).finish()
         selected = items[index - 1]
         return selected.platform, selected.author_id, selected.author_name
     matched = match_subscription(items, value)
