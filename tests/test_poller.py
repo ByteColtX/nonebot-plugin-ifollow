@@ -4,14 +4,17 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from nonebot.adapters.onebot.v11.exception import ActionFailed
+from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target
 
 from nonebot_plugin_ifollow import delivery
 from nonebot_plugin_ifollow.errors import PermanentError, TransientError
+from nonebot_plugin_ifollow.media import WorkMessages
 from nonebot_plugin_ifollow.models import (
     AuthorSubscription,
     SubscriptionStore,
@@ -94,7 +97,7 @@ def patch_media(
     @asynccontextmanager
     async def fake_media(
         work: PlatformWork, _settings: Settings, _author_name: str = ""
-    ) -> AsyncIterator[list[FakeMessage]]:
+    ) -> AsyncIterator[WorkMessages]:
         prepared.append(work.work_id)
         if (
             error is not None
@@ -102,7 +105,13 @@ def patch_media(
             and (fail_works is None or work.work_id in fail_works)
         ):
             raise error
-        yield [FakeMessage(work, sent, fail_for, error or RuntimeError())]
+        yield WorkMessages(
+            cast(
+                list[UniMessage],
+                [FakeMessage(work, sent, fail_for, error or RuntimeError())],
+            ),
+            0,
+        )
 
     monkeypatch.setattr(delivery, "media_for", fake_media)
     return prepared
@@ -595,16 +604,16 @@ async def test_media_for_selects_pipeline_by_platform(
     @asynccontextmanager
     async def douyin_pipeline(
         _work: PlatformWork, _settings: Settings, _author_name: str = ""
-    ) -> AsyncIterator[list[Any]]:
+    ) -> AsyncIterator[WorkMessages]:
         calls.append("douyin")
-        yield []
+        yield WorkMessages([], 0)
 
     @asynccontextmanager
     async def bilibili_pipeline(
         _work: PlatformWork, _settings: Settings, _author_name: str = ""
-    ) -> AsyncIterator[list[Any]]:
+    ) -> AsyncIterator[WorkMessages]:
         calls.append("bilibili")
-        yield []
+        yield WorkMessages([], 0)
 
     monkeypatch.setattr(delivery, "douyin_media_messages", douyin_pipeline)
     monkeypatch.setattr(delivery, "bilibili_media_messages", bilibili_pipeline)
@@ -805,7 +814,10 @@ async def test_send_work_appends_subscriber_mentions(
         target.dump(), subscriber_ids=["1", "2"], mention=mention
     )
 
-    await delivery.send_work([RecordingMessage("文案")], state)  # type: ignore[list-item]
+    await delivery.send_work(
+        WorkMessages(cast(list[UniMessage], [RecordingMessage("文案")]), 0),
+        state,
+    )
 
     text, target_id = sent[0]
     assert target_id == "group"
@@ -816,3 +828,145 @@ async def test_send_work_appends_subscriber_mentions(
     else:
         assert delivery.SEPARATOR not in text
         assert "@" not in text
+
+
+class ForwardSegment:
+    """合并转发节点里的消息段替身。"""
+
+    def __init__(self, type_: str, data: dict[str, Any]) -> None:
+        self.type = type_
+        self.data = data
+
+
+class ForwardMessage:
+    """可导出消息段、也可单独发送的消息替身。"""
+
+    def __init__(self, *segments: ForwardSegment) -> None:
+        self.segments = list(segments)
+        self.sent = 0
+
+    async def export(self, _bot: Any) -> list[ForwardSegment]:
+        return self.segments
+
+    async def send(self, *, target: Target) -> None:
+        self.sent += 1
+
+
+class ForwardBot:
+    """记录合并转发调用；fail=True 时模拟协议端不支持。"""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.self_id = "3763502110"
+        self.fail = fail
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_api(self, api: str, **kwargs: Any) -> None:
+        if self.fail:
+            raise RuntimeError("api not supported")
+        self.calls.append((api, kwargs))
+
+
+def forward_target(monkeypatch: pytest.MonkeyPatch, bot: ForwardBot) -> Target:
+    """构造一个会选择指定机器人的目标。"""
+
+    target = Target.group("456654102")
+    monkeypatch.setattr(Target, "select", AsyncMock(return_value=bot))
+    return target
+
+
+@pytest.mark.asyncio
+async def test_send_work_forwards_multiple_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """媒体达到两条时合并成一条转发，节点保留文案与媒体顺序。"""
+
+    bot = ForwardBot()
+    target = forward_target(monkeypatch, bot)
+    state = TargetSubscription(target.dump(), {})
+    caption = ForwardMessage(ForwardSegment("text", {"text": "文案"}))
+    image = ForwardMessage(
+        ForwardSegment("image", {"file": "file:///a.jpg", "cache": None})
+    )
+    video = ForwardMessage(ForwardSegment("video", {"file": "file:///b.mp4"}))
+    prepared = WorkMessages(cast(list[UniMessage], [caption, image, video]), 2)
+
+    await delivery.send_work(prepared, state)
+
+    api, kwargs = bot.calls[0]
+    assert api == "send_group_forward_msg"
+    assert kwargs["group_id"] == 456654102
+    nodes = kwargs["messages"]
+    assert [node["data"]["content"][0]["type"] for node in nodes] == [
+        "text",
+        "image",
+        "video",
+    ]
+    assert nodes[1]["data"]["content"][0]["data"] == {"file": "file:///a.jpg"}
+    assert caption.sent == image.sent == video.sent == 0
+
+
+@pytest.mark.asyncio
+async def test_send_work_forwards_to_private_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """私聊目标走 send_private_forward_msg。"""
+
+    bot = ForwardBot()
+    target = Target.user("42")
+    monkeypatch.setattr(Target, "select", AsyncMock(return_value=bot))
+    state = TargetSubscription(target.dump(), {})
+    prepared = WorkMessages(
+        cast(
+            list[UniMessage],
+            [
+                ForwardMessage(ForwardSegment("text", {"text": "文案"})),
+                ForwardMessage(ForwardSegment("image", {"file": "a.jpg"})),
+                ForwardMessage(ForwardSegment("image", {"file": "b.jpg"})),
+            ],
+        ),
+        2,
+    )
+
+    await delivery.send_work(prepared, state)
+
+    api, kwargs = bot.calls[0]
+    assert api == "send_private_forward_msg"
+    assert kwargs["user_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_send_work_keeps_single_media_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只有一条媒体时保持原来的逐条发送。"""
+
+    bot = ForwardBot()
+    target = forward_target(monkeypatch, bot)
+    state = TargetSubscription(target.dump(), {})
+    caption = ForwardMessage(ForwardSegment("text", {"text": "文案"}))
+    image = ForwardMessage(ForwardSegment("image", {"file": "a.jpg"}))
+    prepared = WorkMessages(cast(list[UniMessage], [caption, image]), 1)
+
+    await delivery.send_work(prepared, state)
+
+    assert bot.calls == []
+    assert caption.sent == image.sent == 1
+
+
+@pytest.mark.asyncio
+async def test_send_work_falls_back_when_forward_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """协议端不支持合并转发时退回逐条发送。"""
+
+    bot = ForwardBot(fail=True)
+    target = forward_target(monkeypatch, bot)
+    state = TargetSubscription(target.dump(), {})
+    caption = ForwardMessage(ForwardSegment("text", {"text": "文案"}))
+    image = ForwardMessage(ForwardSegment("image", {"file": "a.jpg"}))
+    video = ForwardMessage(ForwardSegment("video", {"file": "b.mp4"}))
+    prepared = WorkMessages(cast(list[UniMessage], [caption, image, video]), 2)
+
+    await delivery.send_work(prepared, state)
+
+    assert caption.sent == image.sent == video.sent == 1

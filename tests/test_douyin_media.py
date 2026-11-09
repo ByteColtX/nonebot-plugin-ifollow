@@ -63,14 +63,15 @@ async def test_douyin_media_messages_downloads_and_cleans_up(
         use_base64=False,
         douyin_cookie="cookie=x",
     )
-    async with douyin_media.douyin_media_messages(make_work(url), settings) as messages:
+    async with douyin_media.douyin_media_messages(make_work(url), settings) as prepared:
         assert created["dir"].is_dir()
-        caption = messages[0].extract_plain_text()
+        caption = prepared.messages[0].extract_plain_text()
         assert caption.startswith(
             f"抖音 · 呆呆丸 更新了\n{media.SEPARATOR}\n标题\n\n时长 00:07"
         )
         assert "720×1280" in caption
-        assert [segment.type for segment in messages[1]] == ["video"]
+        assert prepared.media_count == 1
+        assert [segment.type for segment in prepared.messages[1]] == ["video"]
 
     assert not created["dir"].exists()
     assert created["url"] == url
@@ -111,9 +112,10 @@ async def test_douyin_media_messages_sends_note_images(
         media_max_bytes=100 * 1024 * 1024,
         use_base64=False,
     )
-    async with douyin_media.douyin_media_messages(make_work(url), settings) as messages:
-        caption = messages[0].extract_plain_text()
+    async with douyin_media.douyin_media_messages(make_work(url), settings) as prepared:
+        caption = prepared.messages[0].extract_plain_text()
         assert caption.startswith("抖音 · 呆呆丸 更新了")
-        assert [segment.type for segment in messages[1]] == ["image", "image"]
+        assert prepared.media_count == 2
+        assert [segment.type for segment in prepared.messages[1]] == ["image", "image"]
 
     assert created["url"] == url

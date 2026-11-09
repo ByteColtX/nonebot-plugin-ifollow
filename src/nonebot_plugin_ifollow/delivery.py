@@ -7,7 +7,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any
 
-from nonebot import get_bots, logger
+from nonebot import get_bots, get_driver, logger
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target
 
@@ -19,6 +19,7 @@ from .failures import (
     is_permanent_work_error,
     short_reason,
 )
+from .media import WorkMessages
 from .models import AuthorSubscription, SubscriptionStore, TargetSubscription
 from .platforms import Cursor, FeedKind, PlatformWork, is_newer
 from .settings import Settings
@@ -27,6 +28,9 @@ from .style import SEPARATOR
 
 SENT_MEMORY = 50
 """每个作者在每个目标上记住最近多少个已发标识，用于同一作者的跨 feed 去重。"""
+
+FORWARD_MEDIA_THRESHOLD = 2
+"""媒体数量达到该值时改用合并转发。"""
 
 AttemptKey = tuple[str, str, str, str]
 
@@ -58,7 +62,7 @@ def attempt_key(
 
 def media_for(
     work: PlatformWork, settings: Settings, author_name: str = ""
-) -> AbstractAsyncContextManager[list[UniMessage]]:
+) -> AbstractAsyncContextManager[WorkMessages]:
     """按平台选择解析下载上下文。
 
     Args:
@@ -259,20 +263,65 @@ async def deliver_work(
             )
 
 
-async def send_work(
-    messages: list[UniMessage], target_state: TargetSubscription
-) -> None:
-    """把一条作品的消息发给一个目标；订阅人提醒合并到文案末尾。"""
+async def send_forward_work(messages: list[UniMessage], target: Target) -> bool:
+    """把一条作品的消息合并成转发；协议端不支持时返回 ``False``。"""
+
+    try:
+        bot = await target.select()
+    except Exception as exc:
+        logger.debug(f"合并转发找不到可用机器人，改发单条：{exc}")
+        return False
+    private = bool(target.private)
+    api = "send_private_forward_msg" if private else "send_group_forward_msg"
+    key = "user_id" if private else "group_id"
+    nickname = get_driver().config.nickname
+    name = next(iter(nickname), None) if nickname else None
+    try:
+        nodes = []
+        for message in messages:
+            exported = await message.export(bot)
+            nodes.append(
+                {
+                    "type": "node",
+                    "data": {
+                        "name": str(name or "爱播"),
+                        "uin": int(bot.self_id),
+                        "content": [
+                            {
+                                "type": segment.type,
+                                "data": {
+                                    field: value
+                                    for field, value in segment.data.items()
+                                    if value is not None
+                                },
+                            }
+                            for segment in exported
+                        ],
+                    },
+                }
+            )
+        await bot.call_api(api, messages=nodes, **{key: int(target.id)})
+    except Exception as exc:
+        logger.debug(f"媒体合并转发失败，改发单条：{exc}")
+        return False
+    return True
+
+
+async def send_work(prepared: WorkMessages, target_state: TargetSubscription) -> None:
+    """把一条作品发给一个目标；媒体达到阈值时合并转发。"""
 
     target = Target.load(target_state.target.copy())
-    outgoing: list[UniMessage] = list(messages)
-    if messages and target_state.mention and target_state.subscriber_ids:
+    outgoing = list(prepared.messages)
+    if outgoing and target_state.mention and target_state.subscriber_ids:
         footer = UniMessage(f"\n{SEPARATOR}\n")
         for index, subscriber_id in enumerate(target_state.subscriber_ids):
             if index:
                 footer += " "
             footer += UniMessage.at(subscriber_id)
-        outgoing[0] = messages[0] + footer
+        outgoing[0] = outgoing[0] + footer
+    if prepared.media_count >= FORWARD_MEDIA_THRESHOLD:
+        if await send_forward_work(outgoing, target):
+            return
     for message in outgoing:
         await message.send(target=target)
 

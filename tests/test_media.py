@@ -197,10 +197,12 @@ async def test_build_messages_puts_caption_first(tmp_path: Path) -> None:
     result = SimpleNamespace(title="标题", content="")
     download = SimpleNamespace(media=[make_file(image)])
 
-    messages = await media.build_messages(
+    prepared = await media.build_messages(
         result, download, META, label="B站", policy=policy()
     )
+    messages = prepared.messages
 
+    assert prepared.media_count == 1
     assert (
         messages[0]
         .extract_plain_text()
@@ -382,8 +384,8 @@ async def test_media_messages_for_skips_download_when_everything_is_too_big(
         cookie=None,
         label="抖音",
         temp_prefix="ifollow-test-",
-    ) as messages:
-        text = messages[0].extract_plain_text()
+    ) as prepared:
+        text = prepared.messages[0].extract_plain_text()
         assert text.startswith("抖音 · 呆呆丸 更新了")
         assert "已跳过 1 个超过 1MB 的文件" in text
 

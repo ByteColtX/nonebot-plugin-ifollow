@@ -9,9 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from nonebot_plugin_alconna import UniMessage
-
-from .media import MediaPolicy, WorkMeta, media_messages_for
+from .media import MediaPolicy, WorkMessages, WorkMeta, media_messages_for
 from .platforms import PlatformWork
 from .settings import Settings
 from .style import platform_name
@@ -20,7 +18,7 @@ from .style import platform_name
 @asynccontextmanager
 async def bilibili_media_messages(
     work: PlatformWork, settings: Settings, author_name: str = ""
-) -> AsyncIterator[list[UniMessage]]:
+) -> AsyncIterator[WorkMessages]:
     """解析并下载一个 B 站视频或动态，产出待发送的消息列表。
 
     媒体落在临时目录里，退出上下文时删除，因此调用方必须在上下文内把消息发完。

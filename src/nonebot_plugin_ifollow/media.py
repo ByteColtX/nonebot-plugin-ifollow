@@ -106,6 +106,19 @@ class MediaBundle:
     """体积上限，用于在文案里说明跳过原因。"""
 
 
+@dataclass(frozen=True, slots=True)
+class WorkMessages:
+    """一条作品待发送的文案与媒体消息。
+
+    Attributes:
+        messages: 第一条是文案，其后是媒体消息。
+        media_count: 实际发送的媒体数量；图片按张、视频按条计数。
+    """
+
+    messages: list[UniMessage]
+    media_count: int
+
+
 def _import_parsehub() -> Any:
     """导入 parsehub 并返回实例，供线程调用。"""
 
@@ -500,7 +513,7 @@ async def build_messages(
     label: str,
     policy: MediaPolicy,
     skipped: int = 0,
-) -> list[UniMessage]:
+) -> WorkMessages:
     """把解析结果与下载结果拼成待发送的消息列表。
 
     Args:
@@ -512,13 +525,16 @@ async def build_messages(
         skipped: 下载前已因体积超限剔除的媒体数量。
 
     Returns:
-        第一条是文案，其后是媒体消息。
+        文案、媒体消息与实际媒体数量。
     """
 
     bundle = await media_messages(
         downloaded_files(download), policy, label, meta.duration_unit, skipped
     )
-    return [UniMessage(caption(meta, result, bundle)), *bundle.messages]
+    return WorkMessages(
+        [UniMessage(caption(meta, result, bundle)), *bundle.messages],
+        bundle.count,
+    )
 
 
 @asynccontextmanager
@@ -530,7 +546,7 @@ async def media_messages_for(
     cookie: str | None,
     label: str,
     temp_prefix: str,
-) -> AsyncIterator[list[UniMessage]]:
+) -> AsyncIterator[WorkMessages]:
     """解析并下载一个作品，产出待发送的消息列表。
 
     媒体落在临时目录里，退出上下文时删除，因此调用方必须在上下文内把消息发完。
@@ -544,7 +560,7 @@ async def media_messages_for(
         temp_prefix: 临时目录前缀。
 
     Yields:
-        消息列表，第一条是文案，其后是媒体。
+        文案、媒体消息与实际媒体数量。
     """
 
     workdir = Path(tempfile.mkdtemp(prefix=temp_prefix))

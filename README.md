@@ -72,6 +72,8 @@ plugins = ["nonebot_plugin_ifollow"]
   读不到同一路径时才开 `IFOLLOW_USE_BASE64`（插件读字节放进消息段的 `raw`，由 alconna 导出层
   编码成 `base64://`）。单个媒体超过 `IFOLLOW_MEDIA_MAX_MB` 时跳过该媒体，
   并在文案里注明「另有 N 个媒体超过 XMB 未发送」。
+- **合并转发**：同一作品实际发送的媒体数 ≥ 2 时，文案与媒体合并成一条转发；协议端不支持转发时
+  自动退回逐条发送。
 - **旧配置**：`IFOLLOW_SUBSCRIBE_INTERVAL` / `IFOLLOW_SUBSCRIBE_COUNT` 已废弃且不再读取，请改成新名字。
 - **数据格式**：订阅数据为 v3，不兼容旧版本；升级需清空插件数据目录里的 `subscriptions.json` 并重新订阅。
 
