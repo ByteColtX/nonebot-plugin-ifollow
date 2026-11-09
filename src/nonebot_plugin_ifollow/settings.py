@@ -4,8 +4,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nonebot import get_plugin_config
+from nonebot import get_plugin_config, logger
 from pydantic import BaseModel, Field
+
+
+def _parsehub_cookie(platform: str) -> str | None:
+    """读取 ParseHub 默认 Cookie 文件中的平台 Cookie。
+
+    Args:
+        platform: ParseHub 的平台标识，例如 ``douyin``。
+
+    Returns:
+        文件中的 Cookie；文件不存在、解析失败或未配置该平台时返回 ``None``。
+    """
+
+    try:
+        from parsehub.cli_config import FileCookieStore
+    except ImportError:
+        logger.debug("未安装 ParseHub，跳过默认 Cookie 文件")
+        return None
+    try:
+        return FileCookieStore().get(platform)
+    except (OSError, ValueError) as exc:
+        logger.warning(f"读取 ParseHub 默认 Cookie 失败：{exc}")
+        return None
 
 
 class Config(BaseModel):
@@ -44,8 +66,8 @@ class Settings:
             max_items=raw.ifollow_sub_max_items,
             media_max_bytes=raw.ifollow_media_max_mb * 1024 * 1024,
             use_base64=raw.ifollow_use_base64,
-            douyin_cookie=raw.ifollow_douyin_cookie or None,
-            bilibili_cookie=raw.ifollow_bilibili_cookie or None,
+            douyin_cookie=raw.ifollow_douyin_cookie or _parsehub_cookie("douyin"),
+            bilibili_cookie=raw.ifollow_bilibili_cookie or _parsehub_cookie("bilibili"),
         )
 
     @property

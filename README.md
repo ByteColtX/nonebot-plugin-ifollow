@@ -62,8 +62,8 @@ plugins = ["nonebot_plugin_ifollow"]
 | `IFOLLOW_SUB_MAX_ITEMS` | 否 | `5` | 每作者每 feed 每轮最多补发的作品数，范围 1-50 |
 | `IFOLLOW_MEDIA_MAX_MB` | 否 | `100` | 单个媒体体积上限（MB），视频类会在下载前先探测 |
 | `IFOLLOW_USE_BASE64` | 否 | `false` | 媒体编码成 base64 发送，仅协议端与插件不同机时需要 |
-| `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie，匿名即可轮询，通常无需填写 |
-| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie（SESSDATA）；配置后才会轮询动态 |
+| `IFOLLOW_DOUYIN_COOKIE` | 否 | 无 | 抖音网页 Cookie；未配置时读取 ParseHub 默认 Cookie 文件 |
+| `IFOLLOW_BILIBILI_COOKIE` | 否 | 无 | B 站 Cookie（SESSDATA）；未配置时读取 ParseHub 默认 Cookie 文件 |
 
 - **周期**：每个作者按自己的节奏到期，订阅 30 个作者也不会互相拖慢；扫描间隔取周期的四分之一
   （15 秒 ~ 5 分钟），抓取并发 4。默认 30 分钟按「多数作者月更」定，34 个作者约 1600 次请求/天。
@@ -80,8 +80,13 @@ plugins = ["nonebot_plugin_ifollow"]
 抖音接口要求 `a_bogus` 签名 + 自动注册的 `ttwid`，**匿名即可轮询**，`IFOLLOW_DOUYIN_COOKIE` 只是加强项
 （其中的 `ttwid` 会被自动注册值覆盖）。
 
-B 站作者资料与视频投稿走 APP 接口，匿名可用；**动态没有稳定的匿名接口**，只有配置了
-`IFOLLOW_BILIBILI_COOKIE` 才会轮询动态。获取方式：浏览器登录后按 F12 → Network → 复制请求头里的整段
+未设置 `IFOLLOW_DOUYIN_COOKIE` / `IFOLLOW_BILIBILI_COOKIE` 时，插件会回退读取 ParseHub 的默认
+Cookie 文件（`parsehub` 配置目录下的 `cookies.toml`，Linux 通常是 `~/.config/parsehub/cookies.toml`），
+取 `[cookie]` 中的 `douyin` / `bilibili`。显式配置项优先；文件不存在、无法解析或缺少对应平台时按
+未配置处理。
+
+B 站作者资料与视频投稿走 APP 接口，匿名可用；**动态没有稳定的匿名接口**，只有拿到 B 站 Cookie
+（配置项或 ParseHub 默认文件）才会轮询动态。获取方式：浏览器登录后按 F12 → Network → 复制请求头里的整段
 `Cookie`。Cookie 等同于账号控制权，建议用小号，不要提交到仓库。
 
 ## 🎉 使用
