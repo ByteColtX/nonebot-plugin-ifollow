@@ -80,6 +80,28 @@ async def test_paginate_dedupes_and_sorts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paginate_keep_filters_without_stopping_pagination() -> None:
+    """过滤掉的条目不能计入 limit，也不能让翻页提前结束。"""
+
+    pages = {
+        None: Page([make_work("v1", 30), make_work("n", 20)], "p2", True),
+        "p2": Page([make_work("v2", 10)], None, False),
+    }
+
+    async def fetch_page(token: str | None) -> Page:
+        return pages[token]
+
+    works = await paginate(
+        fetch_page,
+        cursor=Cursor("x", 1),
+        limit=5,
+        keep=lambda work: work.work_id == "n",
+    )
+
+    assert [work.work_id for work in works] == ["n"]
+
+
+@pytest.mark.asyncio
 async def test_paginate_stops_when_platform_reports_no_more() -> None:
     async def fetch_page(_token: str | None) -> Page:
         return Page([make_work("a", 10)], None, False)

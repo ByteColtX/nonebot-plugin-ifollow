@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -11,7 +12,7 @@ import httpx
 from nonebot import logger
 
 from .douyin_abogus import generate_abogus
-from .errors import PermanentError, TransientError
+from .errors import IfollowError, PermanentError, TransientError
 from .pagination import Page, paginate
 from .platforms import (
     AuthorInfo,
@@ -50,14 +51,17 @@ BLOCKED_STATUS_CODES = frozenset({403, 429, 444, 500, 502, 503, 504})
 INVALID_AUTHOR_STATUS = 5
 """作品列表接口表示作者不存在或已注销的 status_code。"""
 
+AID_MOBILE = "1128"
+"""移动端客户端号：作品列表实时，但不返回图文。"""
+
 AID_WEB = "6383"
-"""PC web 客户端号：能返回图文，但作品列表可能滞后数天。"""
+"""PC web 客户端号：能返回图文（``aweme_type=68``），但作品列表可能滞后数天。"""
 
 POST_PAGE_SIZE = 20
 """作品列表单页条数。
 
-不传 ``count`` 时 6383 只回 3 条，图文（``aweme_type=68``）几乎全漏；按 20 条
-拉取不增加请求数，只是每页多拿数据。
+不传 ``count`` 时 1128 只回 2 条、6383 只回 3 条，图文（``aweme_type=68``）
+几乎全漏；按 20 条拉取不增加请求数，只是每页多拿数据。
 """
 
 NOTE_AWEME_TYPE = 68
@@ -191,6 +195,12 @@ def _extract_sec_user_id_from_page(page_text: str) -> str | None:
     return matched.group("sec_user_id") if matched else None
 
 
+def _is_note_work(work: PlatformWork) -> bool:
+    """判断作品是否为图文：图文使用 ``/note/`` 链接。"""
+
+    return "/note/" in work.url
+
+
 async def fetch(
     settings: Settings,
     author_id: str,
@@ -198,6 +208,9 @@ async def fetch(
     cursor: Cursor | None = None,
 ) -> list[PlatformWork]:
     """读取作者作品，返回从新到旧的列表。
+
+    1128（移动端）负责实时视频，6383（PC web）负责图文；6383 的列表可能滞后
+    数天，所以只从它取图文，视频以 1128 为准。
 
     Args:
         settings: 运行期配置。
@@ -217,28 +230,68 @@ async def fetch(
         return []
     async with _client(settings, timeout=30) as client:
 
-        async def fetch_page(token: str | None) -> Page:
-            data = await _fetch_post_page(settings, client, author_id, token or "0")
-            raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
-            if not isinstance(raw_works, list):
-                raise TransientError("抖音接口缺少 aweme_list")
-            works = [
-                work
-                for raw in raw_works
-                if (work := _parse_work_item(raw, author_id)) is not None
-            ]
-            next_cursor = str(data.get("max_cursor") or "")
-            has_more = bool(
-                data.get("has_more") and next_cursor and next_cursor != (token or "0")
-            )
-            return Page(
-                works=works,
-                next_token=next_cursor or None,
-                has_more=has_more,
+        async def fetch_stream(
+            aid: str, keep: Callable[[PlatformWork], bool]
+        ) -> list[PlatformWork]:
+            async def fetch_page(token: str | None) -> Page:
+                data = await _fetch_post_page(
+                    settings, client, author_id, token or "0", aid
+                )
+                raw_works = data.get("aweme_list") or data.get("aweme_list_v2") or []
+                if not isinstance(raw_works, list):
+                    raise TransientError("抖音接口缺少 aweme_list")
+                works = [
+                    work
+                    for raw in raw_works
+                    if (work := _parse_work_item(raw, author_id)) is not None
+                ]
+                next_cursor = str(data.get("max_cursor") or "")
+                has_more = bool(
+                    data.get("has_more")
+                    and next_cursor
+                    and next_cursor != (token or "0")
+                )
+                return Page(
+                    works=works,
+                    next_token=next_cursor or None,
+                    has_more=has_more,
+                )
+
+            return await paginate(
+                fetch_page,
+                cursor=cursor,
+                limit=settings.max_items,
+                keep=keep,
             )
 
-        works = await paginate(fetch_page, cursor=cursor, limit=settings.max_items)
+        results = await asyncio.gather(
+            fetch_stream(AID_MOBILE, lambda work: not _is_note_work(work)),
+            fetch_stream(AID_WEB, _is_note_work),
+            return_exceptions=True,
+        )
 
+    works_by_id: dict[str, PlatformWork] = {}
+    errors: list[IfollowError] = []
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, IfollowError):
+            errors.append(result)
+            continue
+        if isinstance(result, BaseException):
+            raise result
+        for work in result:
+            works_by_id.setdefault(work.work_id, work)
+
+    if errors and not works_by_id:
+        # 两条流都失败，或唯一有结果的那条是空列表：不能让空结果掩盖故障。
+        raise errors[0]
+    if errors:
+        logger.warning(
+            f"抖音作者 {author_id} 有一条作品列表接口失败，已使用其余结果：{errors[0]}"
+        )
+
+    works = sorted(works_by_id.values(), key=lambda work: work.order, reverse=True)
     works = works[: settings.max_items]
     logger.debug(f"抖音作者 {author_id} 拉取到 {len(works)} 个作品")
     return works
@@ -249,14 +302,15 @@ async def _fetch_post_page(
     client: httpx.AsyncClient,
     sec_user_id: str,
     max_cursor: str,
+    aid: str,
 ) -> dict[str, Any]:
     """请求一页作者作品，并校验返回码。"""
 
     params = {
         "device_platform": "webapp",
-        # 只用 6383（PC web）：它能返回图文（aweme_type=68），代价是作品列表
-        # 可能滞后数天；1128（移动端）实时但不返回图文，已不再并发请求。
-        "aid": AID_WEB,
+        # 1128 实时但不返回图文；6383 返回图文但列表可能滞后数天。fetch() 同时
+        # 查询两条流，各取所需。
+        "aid": aid,
         "count": str(POST_PAGE_SIZE),
         "channel": "channel_pc_web",
         "sec_user_id": sec_user_id,

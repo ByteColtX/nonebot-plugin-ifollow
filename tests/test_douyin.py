@@ -81,6 +81,44 @@ def _works_payload(count: int = 1) -> dict[str, Any]:
     }
 
 
+def empty_page() -> httpx.Response:
+    return response(data={"status_code": 0, "aweme_list": []})
+
+
+def responses_by_aid(
+    video: list[httpx.Response],
+    notes: list[httpx.Response] | None = None,
+    extra: list[httpx.Response] | None = None,
+) -> Stub:
+    """按 ``aid`` 回放两条流的响应；非作品列表请求走 ``extra``。"""
+
+    queues = {
+        "1128": video,
+        "6383": notes or [empty_page()],
+        "extra": extra or [],
+    }
+
+    def route(request: httpx.Request) -> httpx.Response:
+        key = (
+            request.url.params["aid"]
+            if request.url.path.endswith("/aweme/v1/web/aweme/post/")
+            else "extra"
+        )
+        queue = queues[key]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    return Stub(route)
+
+
+async def fetch_page(aid: str = "1128") -> dict[str, Any]:
+    """直接请求一页，绕开双流合并，便于验证重试行为。"""
+
+    async with douyin._client(SETTINGS) as http:
+        return await douyin._fetch_post_page(
+            SETTINGS, http, "MS4wLjABAAAA-test", "0", aid
+        )
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Any:
     """安装 MockTransport 客户端，并让 ttwid 每次注册都返回新值。"""
@@ -118,7 +156,7 @@ def test_signed_query_appends_encoded_a_bogus() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_maps_to_common_model(client: Any) -> None:
-    client([response(data=_works_payload())])
+    client(responses_by_aid([response(data=_works_payload())]))
 
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
 
@@ -130,7 +168,7 @@ async def test_fetch_latest_works_maps_to_common_model(client: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_sorts_newest_first(client: Any) -> None:
-    client([response(data=_works_payload(count=3))])
+    client(responses_by_aid([response(data=_works_payload(count=3))]))
 
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
 
@@ -139,7 +177,8 @@ async def test_fetch_latest_works_sorts_newest_first(client: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_latest_works_reports_missing_author(client: Any) -> None:
-    client([response(data={"status_code": douyin.INVALID_AUTHOR_STATUS})])
+    missing = response(data={"status_code": douyin.INVALID_AUTHOR_STATUS})
+    client(responses_by_aid([missing], [missing]))
 
     with pytest.raises(PermanentError) as excinfo:
         await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
@@ -153,9 +192,9 @@ async def test_fetch_latest_works_retries_with_new_ttwid_on_empty_body(
 ) -> None:
     client([response(content=b""), response(data=_works_payload())])
 
-    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+    data = await fetch_page()
 
-    assert works[0].work_id == "100"
+    assert data["aweme_list"][0]["aweme_id"] == "100"
     assert client.ttwids == ["ttwid-0", "ttwid-1"]
 
 
@@ -168,9 +207,9 @@ async def test_fetch_latest_works_retries_on_blocked_status(client: Any) -> None
         ]
     )
 
-    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+    data = await fetch_page()
 
-    assert works
+    assert data["aweme_list"]
     assert len(client.ttwids) == 2
 
 
@@ -179,7 +218,7 @@ async def test_fetch_latest_works_gives_up_after_second_block(client: Any) -> No
     client([response(content=b""), response(content=b"")])
 
     with pytest.raises(TransientError) as excinfo:
-        await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+        await fetch_page()
 
     assert isinstance(excinfo.value, TransientError)
     assert "风控" in str(excinfo.value)
@@ -190,7 +229,7 @@ async def test_fetch_latest_works_rejects_non_json_body(client: Any) -> None:
     client([response(content=b"<html></html>")])
 
     with pytest.raises(TransientError) as excinfo:
-        await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+        await fetch_page()
 
     assert isinstance(excinfo.value, TransientError)
 
@@ -229,35 +268,37 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
     """停机久了要按页补齐，直到翻到游标作品。"""
 
     created = client(
-        [
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": True,
-                    "max_cursor": "50",
-                    "aweme_list": [
-                        {
-                            "aweme_id": "103",
-                            "create_time": 30,
-                            "author": {"nickname": "作者"},
-                        }
-                    ],
-                }
-            ),
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": False,
-                    "aweme_list": [
-                        {
-                            "aweme_id": "100",
-                            "create_time": 10,
-                            "author": {"nickname": "作者"},
-                        }
-                    ],
-                }
-            ),
-        ]
+        responses_by_aid(
+            [
+                response(
+                    data={
+                        "status_code": 0,
+                        "has_more": True,
+                        "max_cursor": "50",
+                        "aweme_list": [
+                            {
+                                "aweme_id": "103",
+                                "create_time": 30,
+                                "author": {"nickname": "作者"},
+                            }
+                        ],
+                    }
+                ),
+                response(
+                    data={
+                        "status_code": 0,
+                        "has_more": False,
+                        "aweme_list": [
+                            {
+                                "aweme_id": "100",
+                                "create_time": 10,
+                                "author": {"nickname": "作者"},
+                            }
+                        ],
+                    }
+                ),
+            ]
+        )
     )
 
     works = await douyin.fetch(
@@ -265,7 +306,12 @@ async def test_fetch_latest_works_pages_until_cursor(client: Any) -> None:
     )
 
     assert [work.work_id for work in works] == ["103", "100"]
-    assert len(created.requests) == 2
+    video_requests = [
+        request
+        for request in created.requests
+        if request.url.params["aid"] == douyin.AID_MOBILE
+    ]
+    assert len(video_requests) == 2
 
 
 @pytest.mark.asyncio
@@ -273,52 +319,61 @@ async def test_fetch_latest_works_without_cursor_requests_one_page(
     client: Any,
 ) -> None:
     created = client(
-        [
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": True,
-                    "max_cursor": "50",
-                    "aweme_list": [
-                        {
-                            "aweme_id": "103",
-                            "create_time": 30,
-                            "author": {"nickname": "作者"},
-                        }
-                    ],
-                }
-            )
-        ]
+        responses_by_aid(
+            [
+                response(
+                    data={
+                        "status_code": 0,
+                        "has_more": True,
+                        "max_cursor": "50",
+                        "aweme_list": [
+                            {
+                                "aweme_id": "103",
+                                "create_time": 30,
+                                "author": {"nickname": "作者"},
+                            }
+                        ],
+                    }
+                )
+            ]
+        )
     )
 
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
 
     assert [work.work_id for work in works] == ["103"]
-    assert len(created.requests) == 1
+    assert {request.url.params["aid"] for request in created.requests} == {
+        douyin.AID_MOBILE,
+        douyin.AID_WEB,
+    }
+    assert len(created.requests) == 2
 
 
 @pytest.mark.asyncio
 async def test_fetch_returns_image_posts(client: Any) -> None:
-    """单流也要返回图文作品，并使用 note 链接。"""
+    """1128 没有图文，图文的 note 链接来自 6383。"""
 
     client(
-        [
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": False,
-                    "aweme_list": [
-                        {
-                            "aweme_id": "200",
-                            "aweme_type": 68,
-                            "create_time": 40,
-                            "desc": "图文作品",
-                            "author": {"nickname": "作者"},
-                        }
-                    ],
-                }
-            )
-        ]
+        responses_by_aid(
+            [empty_page()],
+            [
+                response(
+                    data={
+                        "status_code": 0,
+                        "has_more": False,
+                        "aweme_list": [
+                            {
+                                "aweme_id": "200",
+                                "aweme_type": 68,
+                                "create_time": 40,
+                                "desc": "图文作品",
+                                "author": {"nickname": "作者"},
+                            }
+                        ],
+                    }
+                )
+            ],
+        )
     )
 
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
@@ -328,28 +383,83 @@ async def test_fetch_returns_image_posts(client: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_merges_mobile_videos_with_web_notes(client: Any) -> None:
+    """1128 的视频与 6383 的图文合并；6383 里滞后的视频不再重复。"""
+
+    video = {"aweme_id": "300", "create_time": 50, "author": {"nickname": "作者"}}
+    stale_video = {"aweme_id": "100", "create_time": 10, "author": {"nickname": "作者"}}
+    note = {
+        "aweme_id": "200",
+        "aweme_type": 68,
+        "create_time": 40,
+        "author": {"nickname": "作者"},
+    }
+    client(
+        responses_by_aid(
+            [response(data={"status_code": 0, "aweme_list": [video]})],
+            [
+                response(
+                    data={
+                        "status_code": 0,
+                        "aweme_list": [note, stale_video],
+                    }
+                )
+            ],
+        )
+    )
+
+    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+
+    assert [work.work_id for work in works] == ["300", "200"]
+    assert works[1].url == "https://www.douyin.com/note/200"
+
+
+@pytest.mark.asyncio
+async def test_fetch_does_not_starve_notes_behind_videos(client: Any) -> None:
+    """6383 同一页里前面的视频很多时，图文仍不能被补发上限挤掉。"""
+
+    videos = [
+        {"aweme_id": str(300 + index), "create_time": 50 + index}
+        for index in range(SETTINGS.max_items)
+    ]
+    note = {"aweme_id": "200", "aweme_type": 68, "create_time": 40}
+    client(
+        responses_by_aid(
+            [empty_page()],
+            [response(data={"status_code": 0, "aweme_list": [*videos, note]})],
+        )
+    )
+
+    works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video")
+
+    assert [work.work_id for work in works] == ["200"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_latest_works_requests_full_page_and_stops_at_limit(
     client: Any,
 ) -> None:
-    """每页按固定条数拉取（否则图文几乎全漏），攒够补发上限后不再翻页。"""
+    """每页按固定条数拉取，攒够补发上限后不再翻页。"""
 
     created = client(
-        [
-            response(
-                data={
-                    "status_code": 0,
-                    "has_more": True,
-                    "max_cursor": "50",
-                    **_works_payload(count=5),
-                }
-            )
-        ]
+        responses_by_aid(
+            [
+                response(
+                    data={
+                        "status_code": 0,
+                        "has_more": True,
+                        "max_cursor": "50",
+                        **_works_payload(count=5),
+                    }
+                )
+            ]
+        )
     )
 
     works = await douyin.fetch(SETTINGS, "MS4wLjABAAAA-test", "video", Cursor("old", 1))
 
     assert len(works) == 5
-    assert len(created.requests) == 1
+    assert len(created.requests) == 2
     assert all(
         request.url.params["count"] == str(douyin.POST_PAGE_SIZE)
         for request in created.requests
@@ -442,7 +552,7 @@ async def test_resolve_sec_user_id_rejects_unknown_input() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_author_uses_latest_work(client: Any) -> None:
-    client([response(data=_works_payload(count=2))])
+    client(responses_by_aid([response(data=_works_payload(count=2))]))
 
     resolved = await douyin.resolve_author(SETTINGS, "MS4wLjABAAAA-test")
 
@@ -457,39 +567,43 @@ async def test_resolve_author_backfills_handle_from_profile(client: Any) -> None
     payload = _works_payload(count=1)
     payload["aweme_list"][0]["author"] = {"nickname": "作者"}
     created = client(
-        [
-            response(data=payload),
-            response(
-                data={
-                    "status_code": 0,
-                    "user": {
-                        "nickname": "作者",
-                        "unique_id": "30086054030",
-                    },
-                }
-            ),
-        ]
+        responses_by_aid(
+            [response(data=payload)],
+            extra=[
+                response(
+                    data={
+                        "status_code": 0,
+                        "user": {
+                            "nickname": "作者",
+                            "unique_id": "30086054030",
+                        },
+                    }
+                )
+            ],
+        )
     )
 
     resolved = await douyin.resolve_author(SETTINGS, "MS4wLjABAAAA-test")
 
     assert resolved.author.handle == "30086054030"
-    assert len(created.requests) == 2
+    assert len(created.requests) == 3
     assert created.requests[-1].url.path == "/aweme/v1/web/user/profile/other/"
 
 
 @pytest.mark.asyncio
 async def test_resolve_author_falls_back_to_profile(client: Any) -> None:
     client(
-        [
-            response(data={"status_code": 0, "aweme_list": []}),
-            response(
-                data={
-                    "status_code": 0,
-                    "user": {"nickname": "作者", "unique_id": "deagle"},
-                }
-            ),
-        ]
+        responses_by_aid(
+            [empty_page()],
+            extra=[
+                response(
+                    data={
+                        "status_code": 0,
+                        "user": {"nickname": "作者", "unique_id": "deagle"},
+                    }
+                )
+            ],
+        )
     )
 
     resolved = await douyin.resolve_author(SETTINGS, "MS4wLjABAAAA-test")

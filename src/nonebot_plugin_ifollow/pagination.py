@@ -33,7 +33,11 @@ def reaches_cursor(works: Sequence[PlatformWork], cursor: Cursor) -> bool:
 
 
 async def paginate(
-    fetch_page: PageFetcher, *, cursor: Cursor | None, limit: int
+    fetch_page: PageFetcher,
+    *,
+    cursor: Cursor | None,
+    limit: int,
+    keep: Callable[[PlatformWork], bool] | None = None,
 ) -> list[PlatformWork]:
     """按页拉取作品，返回从新到旧、按 ``work_id`` 去重的列表。
 
@@ -44,6 +48,7 @@ async def paginate(
         fetch_page: 取一页的回调，参数是上一页给出的翻页令牌。
         cursor: 目标当前的游标，``None`` 表示首次订阅。
         limit: 一次最多攒多少条作品。
+        keep: 只保留满足条件的作品；分页仍按整页推进，过滤掉的条目不计入 ``limit``。
 
     Returns:
         从新到旧排列的作品列表。
@@ -56,7 +61,7 @@ async def paginate(
         page = await fetch_page(token)
         fresh = [work for work in page.works if work.work_id not in seen]
         seen.update(work.work_id for work in fresh)
-        works.extend(fresh)
+        works.extend(work for work in fresh if keep is None or keep(work))
         if not fresh or not page.has_more or page.next_token is None:
             break
         if cursor is None or len(works) >= limit:
